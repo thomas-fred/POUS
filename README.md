@@ -14,7 +14,14 @@ First activate your environment:
 micromamba activate POUS
 ```
 
-Then, start a notebook server:
+Run the preprocessing script to read the raw CSV files located in `./data/raw`,
+calculate the OutageFraction and save the results as parquet. See
+`./data/processed/` for the output parquet files.
 ```
-jupyter notebook plot_outages.ipynb
+python preprocess.py
+```
+
+To start a notebook server and expore plotting outages:
+```
+jupyter notebook plot_outage.ipynb
 ```
