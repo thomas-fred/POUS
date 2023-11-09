@@ -1,14 +1,18 @@
 name: POUS
 channels:
   - default
+  - bioconda
   - conda-forge
 dependencies:
-  - python==3.11
   - geopandas
-  - pandas
-  - pyarrow
-  - matplotlib
   - ipykernel
   - jupyter
   - nb_conda_kernels
+  - matplotlib
   - multiprocess
+  - pandas
+  - pip:
+    - --editable .  # bespoke POUS library code
+  - pyarrow
+  - python==3.11
+  - snakemake

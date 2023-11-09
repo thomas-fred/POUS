@@ -1,3 +1,16 @@
+Metadata-Version: 2.1
+Name: pous
+Version: 0.0.1
+Summary: Helper package for POUS analysis workflow
+Author-email: Fred Thomas <fred.thomas@eci.ox.ac.uk>
+Project-URL: Homepage, https://github.com/thomas-fred/POUS
+Project-URL: Bug Tracker, https://github.com/thomas-fred/POUS/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+
 Exploring poweroutage.us (POUS) electricity outage data
 
 ## Installation

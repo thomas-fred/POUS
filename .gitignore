@@ -1,4 +1,7 @@
+archive/
+build/
 data/
 plots/
+.snakemake/
 .ipynb_checkpoints/
 __pycache__
