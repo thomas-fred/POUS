@@ -2,12 +2,13 @@
 Workflow for analysing Power Outage US (POUS) data.
 """
 
+number_regex = "[-+]?\d*\.?\d+|[-+]?\d+"
 wildcard_constraints:
     YEAR="\d{4}",
     RESAMPLE_FREQ="\d+(?:H|D|W)",
-    THRESHOLD="\d(?:\.\d+)?",
-    TIME_DAYS="\d(?:\.\d+)?",
-    SPACE_DEG="\d(?:\.\d+)?",
+    THRESHOLD=number_regex,
+    TIME_DAYS=number_regex,
+    SPACE_DEG=number_regex,
 
 YEARS = range(2017, 2023)  # years of available data
 
@@ -28,18 +29,18 @@ rule extract_raw_outage_csv:
         """
 
 
-rule process_raw_outage_csv:
+rule parse_raw_outage_csv:
     """
-    Read from CSV, make datetime index, drop superfluous columns, save as parquet.
+    Read from CSV, make datetime/county index, drop superfluous columns, save as parquet.
     """
     input:
         csv = rules.extract_raw_outage_csv.output.csv
     output:
         cleaned = "data/output/outage/by_year/{YEAR}.pq"
     run:
-        from pous.io import read_POUS_csv
+        from pous.io import parse_pous_csv
 
-        read_POUS_csv(input.csv).to_parquet(output.cleaned)
+        parse_pous_csv(input.csv).to_parquet(output.cleaned)
 
 
 rule resample_outages:
@@ -57,7 +58,7 @@ rule resample_outages:
         import pandas as pd
         from tqdm import tqdm
 
-        hourly_with_gaps = pd.concat([pd.read_parquet(path) for path in input.years])
+        hourly_with_gaps = pd.concat([pd.read_parquet(path, columns=["OutageFraction"]) for path in input.years])
         counties = sorted(hourly_with_gaps.index.get_level_values("CountyFIPS").unique())
 
         datetimes = hourly_with_gaps.index.get_level_values(0)
@@ -84,6 +85,8 @@ rule resample_outages:
             gap_filled_resampled.append(data)
 
         resampled = pd.concat(gap_filled_resampled)
+        resampled = resampled.set_index([resampled.index, resampled.CountyFIPS]).drop(columns=["CountyFIPS"])
+        resampled = resampled.sort_index(level=["RecordDateTime", "CountyFIPS"])
         print(resampled)
         resampled.to_parquet(output.resampled)
 
@@ -106,21 +109,22 @@ rule identify_events:
         county_boundaries = gpd.read_file(input.counties)
 
         # take the resampled data and filter to periods with OutageFraction above a threshold
-        resampled = pd.read_parquet(input.resampled, columns=["OutageFraction", "CountyFIPS"])
+        resampled = pd.read_parquet(input.resampled, columns=["OutageFraction"])
         resampled_outages = resampled[resampled.OutageFraction > float(wildcards.THRESHOLD)]
 
-        data_start: pd.Timestamp = resampled.index.min()
+        data_start: pd.Timestamp = resampled.index.get_level_values(level="RecordDateTime").min()
 
         resample_period_ns = pd.Timedelta(wildcards.RESAMPLE_FREQ).total_seconds() * 1E9
         day_in_ns = 1E9 * 60 * 60 * 24
 
         events = []
-        for county_code in tqdm(resampled_outages.CountyFIPS.unique()):
+        for county_code in tqdm(resampled_outages.index.get_level_values("CountyFIPS").unique()):
 
             # lookup county
             county_centroid = county_boundaries.set_index("GEOID").loc[county_code].geometry.centroid
 
-            county_resampled: pd.DataFrame = resampled_outages[resampled_outages.CountyFIPS == county_code]
+            county_resampled: pd.DataFrame = resampled_outages.loc[(slice(None), county_code), :]
+            county_resampled = county_resampled.reset_index(level="CountyFIPS")
 
             # picking out runs of resampled outage periods
             run_start_index = 0
@@ -217,14 +221,8 @@ rule cluster_events:
 
         events.geo_cluster_id = events.geo_cluster_id.astype(int)
 
-        # generate a unique spatio-temporal cluster id
-        events["cluster_id"] = events.apply(
-            lambda row: tuple([row.time_cluster_id, int(row.geo_cluster_id)]),
-            axis=1
-        )
         print(events)
-        print(events.cluster_id.value_counts())
-        events.to_csv(output.clusters, index=False)
+        events.to_parquet(output.clusters, index=False)
 
 
 rule plot_clusters:
@@ -237,12 +235,16 @@ rule plot_clusters:
         hourly = "data/output/outage/1H/timeseries.pq",
         counties = "data/input/counties/cb_2018_us_county_500k.shp",
         states = "data/input/states/state_codes.csv",
+        countries = "data/input/countries/ne_110m_admin_0_countries.shp",
     output:
         plots = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/{TIME_DAYS}/{SPACE_DEG}/plots")
     run:
+        import os
+
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
         import geopandas as gpd
         import numpy as np
         import pandas as pd
@@ -250,22 +252,31 @@ rule plot_clusters:
 
         from pous.admin import us_county_name
 
-        hourly = pd.read_parquet(input.hourly)
-        # TODO: should we always store the timeseries data with a county index?
-        hourly = hourly.set_index([hourly.index, hourly.CountyFIPS]).drop(columns=["CountyFIPS"])
-        hourly = hourly.sort_index(level=["RecordDateTime", "CountyFIPS"])
-        events = pd.read_csv(input.clustered_events)
+        plt.style.use('dark_background')  # for cool points
+
+        events = pd.read_parquet(input.clustered_events)
+        # generate a unique spatio-temporal cluster id
+        events["cluster_id"] = events.apply(
+            lambda row: tuple([row.time_cluster_id, int(row.geo_cluster_id)]),
+            axis=1
+        )
         counties = gpd.read_file(input.counties)
+        countries = gpd.read_file(input.countries)
         states = pd.read_csv(input.states)
+        hourly = pd.read_parquet(input.hourly)
+
+        os.makedirs(output.plots, exist_ok=True)
 
         max_plot_length = "60D"
         start_buffer = "2D"
         end_buffer = "5D"
         cmap = matplotlib.colormaps['spring']
+        usa = countries[countries.ISO_A3 == "USA"]
 
+        # TODO: parallelise this loop
         for cluster_id in tqdm(events.cluster_id.unique()):
 
-            if "-1" in cluster_id:
+            if -1 in cluster_id:
                 continue  # couldn't cluster, usually noise
 
             cluster = events[events.cluster_id == cluster_id]
@@ -287,7 +298,7 @@ rule plot_clusters:
                 plot_end: str = str((event_end_datetime + pd.Timedelta(end_buffer)).date())
 
                 county_hourly: pd.DataFrame = hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), :]
-                county_name, state_name, state_code = us_admin_name(outage_attr.CountyFIPS, counties, states)
+                county_name, state_name, state_code = us_county_name(outage_attr.CountyFIPS, counties, states)
 
                 # select our hourly data to plot
                 try:
@@ -334,8 +345,6 @@ rule plot_clusters:
                 cmap="Blues",
                 ax=ax_map
             )
-            world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
-            usa = world[world.iso_a3 == "USA"]
             usa.boundary.plot(ax=ax_map, alpha=0.5)
             ax_map.grid(alpha=0.2)
             ax_map.set_xlim(-130, -65)
@@ -346,6 +355,7 @@ rule plot_clusters:
             ax_map.set_xlabel("Longitude [deg]")
 
             # save to disk
-            filename = f"{cluster_id}_{plot_start}_{plot_end}.png"
+            time, space = cluster_id
+            filename = f"{time}_{space}_{plot_start}_{plot_end}.png"
             f.savefig(os.path.join(output.plots, filename))
             plt.close(f)

@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 
-def read_POUS_csv(csv_path: str) -> pd.DataFrame:
+def parse_pous_csv(csv_path: str) -> pd.DataFrame:
     """
     Read poweroutage.us CSV data from disk.
 
