@@ -212,7 +212,7 @@ rule cluster_events:
     input:
         events = rules.identify_events.output.events
     output:
-        clusters = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/{TIME_DAYS}/{SPACE_DEG}/clusters.csv"
+        clusters = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/{TIME_DAYS}/{SPACE_DEG}/clusters.pq"
     run:
         import geopandas as gpd
         import numpy as np
@@ -275,21 +275,15 @@ rule plot_clusters:
     output:
         plots = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/{TIME_DAYS}/{SPACE_DEG}/plots")
     run:
-        import os
+        import multiprocessing
+        multiprocessing.set_start_method("spawn")
 
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import matplotlib.dates as mdates
         import geopandas as gpd
-        import numpy as np
         import pandas as pd
-        from tqdm import tqdm
 
-        from pous.admin import us_county_name
+        from pous.plot import plot_event_cluster
 
-        plt.style.use('dark_background')  # for cool points
-
+        print("Reading input data...")
         events = pd.read_parquet(input.clustered_events)
         # generate a unique spatio-temporal cluster id
         events["cluster_id"] = events.apply(
@@ -302,96 +296,27 @@ rule plot_clusters:
         hourly = pd.read_parquet(input.hourly)
 
         os.makedirs(output.plots, exist_ok=True)
-
-        max_plot_length = "60D"
-        start_buffer = "2D"
-        end_buffer = "5D"
-        cmap = matplotlib.colormaps['spring']
         usa = countries[countries.ISO_A3 == "USA"]
 
-        # TODO: parallelise this loop
-        for cluster_id in tqdm(events.cluster_id.unique()):
-
-            if -1 in cluster_id:
-                continue  # couldn't cluster, usually noise
-
-            cluster = events[events.cluster_id == cluster_id]
-
-            f, ax = plt.subplots(figsize=(16, 10))
-            ax.axhline(1 - float(wildcards.THRESHOLD), ls="--", color="white", label="Outage threshold")
-
-            for outage_attr in cluster.itertuples():
-
-                event_duration = pd.Timedelta(wildcards.RESAMPLE_FREQ) * outage_attr.n_periods
-                if event_duration > pd.Timedelta(max_plot_length):
-                    print(f"{event_duration=} > {max_plot_length=} for {cluster_id=}, skipping")
-                    continue  # do not plot counties with outages over 90 days, this is probably an error
-
-                # add a buffer around the start and end of the run
-                event_start_datetime = pd.to_datetime(outage_attr.event_start)
-                plot_start: str = str((event_start_datetime - pd.Timedelta(start_buffer)).date())
-                event_end_datetime = event_start_datetime + event_duration
-                plot_end: str = str((event_end_datetime + pd.Timedelta(end_buffer)).date())
-
-                county_hourly: pd.DataFrame = hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), :]
-                county_name, state_name, state_code = us_county_name(outage_attr.CountyFIPS, counties, states)
-
-                # select our hourly data to plot
-                try:
-                    label_str = f"{county_name}, {states.loc[int(state_code), 'state_alpha_2_code']}"
-                except Exception as e:
-                    label_str = f"{county_name}, ?"
-                timeseries = 1 - county_hourly.droplevel(1).loc[:, "OutageFraction"]
-                timeseries.plot(
-                    ax=ax,
-                    x_compat=True,  # enforce standard matplotlib date tick labelling "2023-09-21"
-                    label=label_str,
-                    color=cmap(hash(label_str) % 100 / 100)
+        args = []
+        for cluster_id in events.cluster_id.unique():
+            county_codes = events[events.cluster_id == cluster_id].CountyFIPS.sort_values()
+            county_hourly = hourly.loc[(slice(None), county_codes), :].copy(deep=True)
+            args.append(
+                (
+                    cluster_id,
+                    events,
+                    county_hourly,
+                    float(wildcards.THRESHOLD),
+                    usa,
+                    wildcards.RESAMPLE_FREQ,
+                    counties,
+                    states,
+                    output.plots,
                 )
-
-            ax.set_ylabel("1 - Fraction of customers in county without power", labelpad=20)
-            ax.set_xlabel("Time", labelpad=20)
-            ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
-            ax.set_ylim(-0.05, 1.1)
-            ax.grid(alpha=0.3, which="both")
-            ax.set_title(f"POUS outage cluster {cluster_id}")
-            handles, labels = plt.gca().get_legend_handles_labels()
-            by_label = dict(zip(labels, handles))
-            if len(handles) < 30:
-                ax.legend(
-                    by_label.values(),
-                    by_label.keys(),
-                    bbox_to_anchor=(1.08, 0.98),
-                    ncols=max(1, int(np.ceil(len(cluster) / 35))),
-                    loc="upper right",
-                    prop={'size':7}
-                )
-
-            plt.subplots_adjust(bottom=0.2, top=0.9, left=0.1, right=0.9)
-
-            # inset map of county centres
-            ax_map = f.add_axes([0.73, 0.1, 0.3, 0.2])
-            affected_counties = counties[counties.GEOID.isin(cluster.CountyFIPS)]
-            affected_counties.loc[:, ["GEOID", "geometry"]].merge(
-                cluster.loc[:, ["CountyFIPS", "days_since_data_start"]],
-                left_on="GEOID",
-                right_on="CountyFIPS"
-            ).plot(
-                column="days_since_data_start",
-                cmap="Blues",
-                ax=ax_map
             )
-            usa.boundary.plot(ax=ax_map, alpha=0.5)
-            ax_map.grid(alpha=0.2)
-            ax_map.set_xlim(-130, -65)
-            ax_map.set_ylim(22, 53)
-            ax_map.set_ylabel("Latitude [deg]")
-            ax_map.yaxis.set_label_position("right")
-            ax_map.yaxis.tick_right()
-            ax_map.set_xlabel("Longitude [deg]")
 
-            # save to disk
-            time, space = cluster_id
-            filename = f"{time}_{space}_{plot_start}_{plot_end}.png"
-            f.savefig(os.path.join(output.plots, filename))
-            plt.close(f)
+        print("Plotting...")
+
+        with multiprocessing.Pool(processes=workflow.cores) as pool:
+            pool.starmap(plot_event_cluster, args)
