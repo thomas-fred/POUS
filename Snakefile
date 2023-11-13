@@ -138,8 +138,14 @@ rule identify_events:
             outage_period_resampled_indicies: list[tuple[int, int]] = []
             for i, time_gap_ns in enumerate(np.diff(county_resampled.index.values)):
                 if np.abs((float(time_gap_ns) / resample_period_ns) - 1) < 0.1:
+                    continue
+                else:
                     outage_period_resampled_indicies.append((run_start_index, i))
                     run_start_index = i + 1
+            else:
+                # store the last run which we'd otherwise miss
+                if np.abs((float(time_gap_ns) / resample_period_ns) - 1) < 0.1:
+                    outage_period_resampled_indicies.append((run_start_index, i))
 
             for period_indicies in outage_period_resampled_indicies:
 
