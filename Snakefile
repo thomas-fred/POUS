@@ -298,25 +298,26 @@ rule plot_clusters:
         os.makedirs(output.plots, exist_ok=True)
         usa = countries[countries.ISO_A3 == "USA"]
 
-        args = []
-        for cluster_id in events.cluster_id.unique():
-            county_codes = events[events.cluster_id == cluster_id].CountyFIPS.sort_values()
-            county_hourly = hourly.loc[(slice(None), county_codes), :].copy(deep=True)
-            args.append(
-                (
-                    cluster_id,
-                    events,
-                    county_hourly,
-                    float(wildcards.THRESHOLD),
-                    usa,
-                    wildcards.RESAMPLE_FREQ,
-                    counties,
-                    states,
-                    output.plots,
-                )
-            )
-
         print("Plotting...")
-
+        task_results = []
         with multiprocessing.Pool(processes=workflow.cores) as pool:
-            pool.starmap(plot_event_cluster, args)
+            for cluster_id in events.cluster_id.unique():
+                county_codes = events[events.cluster_id == cluster_id].CountyFIPS.sort_values()
+                county_hourly = hourly.loc[(slice(None), county_codes), :].copy(deep=True)
+                task_result = pool.apply_async(
+                    plot_event_cluster,
+                    (
+                        cluster_id,
+                        events,
+                        county_hourly,
+                        float(wildcards.THRESHOLD),
+                        usa,
+                        wildcards.RESAMPLE_FREQ,
+                        counties,
+                        states,
+                        output.plots,
+                    )
+                )
+                task_results.append(task_result)
+
+            [task.get() for task in task_results]
