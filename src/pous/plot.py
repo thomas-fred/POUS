@@ -5,9 +5,14 @@ import warnings
 import geopandas as gpd
 from glob import glob
 import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import numpy as np
+import pandas as pd
+
+from .admin import us_county_name
 
 
 def map_outage_at_time(
@@ -159,3 +164,109 @@ def map_outage(outage: gpd.GeoDataFrame, event_name: str, n_cpu: int, title: str
 
     print("Done")
     return
+
+
+def plot_event_cluster(
+    cluster_id: tuple[int, int],
+    events: pd.DataFrame,
+    hourly: pd.DataFrame,
+    outage_threshold: float,
+    country: gpd.GeoDataFrame,
+    resample_freq: str,
+    counties: gpd.GeoDataFrame,
+    states: pd.DataFrame,
+    plot_dir: str,
+):
+
+    plt.style.use('dark_background')  # for cool points
+
+    max_plot_length = "60D"
+    start_buffer = "2D"
+    end_buffer = "5D"
+    cmap = matplotlib.colormaps['spring']
+
+    if -1 in cluster_id:
+        return  # couldn't cluster, usually noise
+
+    cluster = events[events.cluster_id == cluster_id]
+
+    f, ax = plt.subplots(figsize=(16, 10))
+    ax.axhline(1 - outage_threshold, ls="--", color="white", label="Outage threshold")
+
+    for outage_attr in cluster.itertuples():
+
+        event_duration = pd.Timedelta(resample_freq) * outage_attr.n_periods
+        if event_duration > pd.Timedelta(max_plot_length):
+            print(f"{event_duration=} > {max_plot_length=} for {cluster_id=}, skipping")
+            continue
+
+        # add a buffer around the start and end of the run
+        event_start_datetime = pd.to_datetime(outage_attr.event_start)
+        plot_start: str = str((event_start_datetime - pd.Timedelta(start_buffer)).date())
+        event_end_datetime = event_start_datetime + event_duration
+        plot_end: str = str((event_end_datetime + pd.Timedelta(end_buffer)).date())
+
+        county_hourly: pd.DataFrame = hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), :]
+        county_name, state_name, state_code = us_county_name(outage_attr.CountyFIPS, counties, states)
+
+        # select our hourly data to plot
+        try:
+            label_str = f"{county_name}, {states.loc[int(state_code), 'state_alpha_2_code']}"
+        except Exception as e:
+            label_str = f"{county_name}, ?"
+        timeseries = 1 - county_hourly.droplevel(1).loc[:, "OutageFraction"]
+        timeseries.plot(
+            ax=ax,
+            x_compat=True,  # enforce standard matplotlib date tick labelling "2023-09-21"
+            label=label_str,
+            color=cmap(hash(label_str) % 100 / 100)
+        )
+
+    ax.set_ylabel("1 - Fraction of customers in county without power", labelpad=20)
+    ax.set_xlabel("Time", labelpad=20)
+    ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
+    ax.set_ylim(-0.05, 1.1)
+    ax.grid(alpha=0.3, which="both")
+    ax.set_title(f"POUS outage cluster {cluster_id}")
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    if len(handles) < 30:
+        ax.legend(
+            by_label.values(),
+            by_label.keys(),
+            bbox_to_anchor=(1.08, 0.98),
+            ncols=max(1, int(np.ceil(len(cluster) / 35))),
+            loc="upper right",
+            prop={'size':7}
+        )
+
+    plt.subplots_adjust(bottom=0.2, top=0.9, left=0.1, right=0.9)
+
+    # inset map of county centres
+    ax_map = f.add_axes([0.73, 0.1, 0.3, 0.2])
+    affected_counties = counties[counties.GEOID.isin(cluster.CountyFIPS)]
+    affected_counties.loc[:, ["GEOID", "geometry"]].merge(
+        cluster.loc[:, ["CountyFIPS", "days_since_data_start"]],
+        left_on="GEOID",
+        right_on="CountyFIPS"
+    ).plot(
+        column="days_since_data_start",
+        cmap="Blues",
+        ax=ax_map
+    )
+    country.boundary.plot(ax=ax_map, alpha=0.5)
+    ax_map.grid(alpha=0.2)
+    ax_map.set_xlim(-130, -65)
+    ax_map.set_ylim(22, 53)
+    ax_map.set_ylabel("Latitude [deg]")
+    ax_map.yaxis.set_label_position("right")
+    ax_map.yaxis.tick_right()
+    ax_map.set_xlabel("Longitude [deg]")
+
+    # save to disk
+    time, space = cluster_id
+    filename = f"{time}_{space}_{plot_start}_{plot_end}.png"
+    filepath = os.path.join(plot_dir, filename)
+    print(filepath)
+    f.savefig(filepath)
+    plt.close(f)
