@@ -1,3 +1,4 @@
+import datetime
 import os
 import multiprocess
 import warnings
@@ -266,6 +267,62 @@ def plot_event_cluster(
     # save to disk
     time, space = cluster_id
     filename = f"{time}_{space}_{plot_start}_{plot_end}.png"
+    filepath = os.path.join(plot_dir, filename)
+    print(filepath)
+    f.savefig(filepath)
+    plt.close(f)
+
+
+def plot_event(
+    outage_threshold: float,
+    event_start: datetime.date,
+    event_end: datetime.date,
+    county_code: str,
+    event_duration: pd.Timedelta,
+    county_hourly: pd.DataFrame,
+    counties: gpd.GeoDataFrame,
+    states: pd.DataFrame,
+    plot_dir: str
+):
+    """
+    Plot timeseries of single event, along with inferred event start and end.
+    """
+
+    plt.style.use('dark_background')  # for cool points
+    cmap = matplotlib.colormaps['spring']
+
+    f, ax = plt.subplots(figsize=(16, 10))
+    ax.axhline(1 - outage_threshold, ls="--", color="white", label="Outage threshold")
+
+    ax.axvline(event_start, label="Event start", ls="--", color="green")
+    ax.axvline(event_end, label="Event end", ls="--", color="red")
+
+    county_name, state_name, state_code = us_county_name(county_code, counties, states)
+
+    # select our hourly data to plot
+    try:
+        admin_str = f"{county_name}, {states.loc[int(state_code), 'state_alpha_2_code']}"
+    except Exception as e:
+        admin_str = f"{county_name}, ?"
+    timeseries = 1 - county_hourly.droplevel(1).loc[:, "OutageFraction"]
+    timeseries.plot(
+        ax=ax,
+        x_compat=True,  # enforce standard matplotlib date tick labelling "2023-09-21"
+        label="Outage timeseries",
+    )
+
+    ax.set_ylabel("1 - Fraction of customers in county without power", labelpad=20)
+    ax.set_xlabel("Time", labelpad=20)
+    ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
+    ax.set_ylim(-0.05, 1.1)
+    ax.grid(alpha=0.3, which="both")
+    duration_days: float = event_duration.total_seconds() / (60 * 60 * 24)
+    ax.set_title(
+        f"POUS outage {admin_str}\n"
+        f"{duration_days:.2f} days"
+    )
+    ax.legend()
+    filename = f"{event_start.date()}_{county_code}.png"
     filepath = os.path.join(plot_dir, filename)
     print(filepath)
     f.savefig(filepath)

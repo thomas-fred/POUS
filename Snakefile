@@ -204,6 +204,75 @@ rule identify_events:
         f.savefig(output.plot)
 
 
+rule plot_events:
+    """
+    Plot county-event timeseries (no event clustering). Overlay inferred durations.
+    """
+    input:
+        events = rules.identify_events.output.events,
+        hourly = "data/output/outage/1H/timeseries.pq",
+        counties = "data/input/counties/cb_2018_us_county_500k.shp",
+        states = "data/input/states/state_codes.csv",
+    output:
+        plots = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_plots")
+    run:
+        import os
+        import multiprocessing
+        multiprocessing.set_start_method("spawn")
+
+        import geopandas as gpd
+        import pandas as pd
+
+        from pous.plot import plot_event
+
+
+        outage_threshold = float(wildcards.THRESHOLD)
+        counties = gpd.read_file(input.counties)
+        states = pd.read_csv(input.states)
+        events = pd.read_parquet(input.events)
+        hourly = pd.read_parquet(input.hourly)
+
+        os.makedirs(output.plots, exist_ok=True)
+
+        max_plot_length = "60D"
+        start_buffer = "2D"
+        end_buffer = "5D"
+
+        tasks = []
+        with multiprocessing.Pool(processes=workflow.cores) as pool:
+            for outage_attr in events.itertuples():
+
+                event_duration = pd.Timedelta(wildcards.RESAMPLE_FREQ) * outage_attr.n_periods
+                if event_duration > pd.Timedelta(max_plot_length):
+                    print(f"{event_duration=} > {max_plot_length=} for {cluster_id=}, skipping")
+                    continue
+
+                event_start_datetime = pd.to_datetime(outage_attr.event_start)
+                plot_start: str = str((event_start_datetime - pd.Timedelta(start_buffer)).date())
+                event_end_datetime = event_start_datetime + event_duration
+                plot_end: str = str((event_end_datetime + pd.Timedelta(end_buffer)).date())
+
+                print(outage_attr.event_start, outage_attr.CountyFIPS)
+                task = pool.apply_async(
+                    plot_event,
+                    (
+                        outage_threshold,
+                        event_start_datetime,
+                        event_end_datetime,
+                        outage_attr.CountyFIPS,
+                        event_duration,
+                        hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), :].copy(deep=True),
+                        counties,
+                        states,
+                        output.plots
+                    )
+                )
+                tasks.append(task)
+
+            [task.get() for task in tasks]
+
+
+
 rule cluster_events:
     """
     Use pairwise distance in days between events to cluster. Then cluster over
