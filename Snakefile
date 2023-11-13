@@ -97,14 +97,21 @@ rule identify_events:
     """
     input:
         resampled = rules.resample_outages.output.resampled,
-        counties = "data/input/counties/cb_2018_us_county_500k.shp"
+        counties = "data/input/counties/cb_2018_us_county_500k.shp",
+        countries = "data/input/countries/ne_110m_admin_0_countries.shp",
     output:
-        events = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/events.pq"
+        events = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/events.pq",
+        plot = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/events.png",
     run:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
         import geopandas as gpd
         import numpy as np
         import pandas as pd
         from tqdm import tqdm
+
+        plt.style.use('dark_background')  # for cool points
 
         county_boundaries = gpd.read_file(input.counties)
 
@@ -166,6 +173,29 @@ rule identify_events:
         events = events.sort_values("days_since_data_start").reset_index(drop=True)
         print(events)
         events.to_parquet(output.events)
+
+        countries = gpd.read_file(input.countries)
+        usa = countries[countries.ISO_A3 == "USA"]
+        events["geometry"] = gpd.points_from_xy(events.longitude, events.latitude)
+        events = gpd.GeoDataFrame(events)
+
+        f, ax = plt.subplots(figsize=(12,8))
+        event_count = events.loc[:, ["CountyFIPS", "n_periods"]].groupby("CountyFIPS").sum()
+        counties = county_boundaries.loc[:, ["GEOID", "geometry"]].set_index("GEOID")
+        outage_events_per_county = event_count.merge(counties, left_on="CountyFIPS", right_on="GEOID")
+        outage_events_per_county = gpd.GeoDataFrame(outage_events_per_county)
+        outage_events_per_county.plot(column="n_periods", ax=ax, cmap=matplotlib.colormaps["spring"])
+        usa.boundary.plot(ax=ax, alpha=0.5)
+        ax.set_title(
+            f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
+            f"Number of discrete county outage events: {len(events)}"
+        )
+        ax.grid(alpha=0.2)
+        ax.set_xlim(-130, -65)
+        ax.set_ylim(22, 53)
+        ax.set_ylabel("Latitude [deg]")
+        ax.set_xlabel("Longitude [deg]")
+        f.savefig(output.plot)
 
 
 rule cluster_events:
