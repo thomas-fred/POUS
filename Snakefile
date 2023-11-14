@@ -218,7 +218,6 @@ rule plot_events:
     run:
         import os
         import multiprocessing
-        multiprocessing.set_start_method("spawn")
 
         import geopandas as gpd
         import pandas as pd
@@ -270,7 +269,6 @@ rule plot_events:
                 tasks.append(task)
 
             [task.get() for task in tasks]
-
 
 
 rule cluster_events:
