@@ -304,7 +304,7 @@ def plot_event(
         admin_str = f"{county_name}, {states.loc[int(state_code), 'state_alpha_2_code']}"
     except Exception as e:
         admin_str = f"{county_name}, ?"
-    timeseries = 1 - county_hourly.droplevel(1).loc[:, "OutageFraction"]
+    timeseries = 1 - county_hourly.droplevel(1)
     timeseries.plot(
         ax=ax,
         x_compat=True,  # enforce standard matplotlib date tick labelling "2023-09-21"

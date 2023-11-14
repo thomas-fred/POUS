@@ -260,7 +260,7 @@ rule plot_events:
                         event_end_datetime,
                         outage_attr.CountyFIPS,
                         event_duration,
-                        hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), :].copy(deep=True),
+                        hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), "OutageFraction"],
                         counties,
                         states,
                         output.plots
