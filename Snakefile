@@ -133,10 +133,18 @@ rule identify_events:
             county_resampled: pd.DataFrame = resampled_outages.loc[(slice(None), county_code), :]
             county_resampled = county_resampled.reset_index(level="CountyFIPS")
 
+            # can't take a diff along one row
+            if len(county_resampled) < 2:
+                continue
+
             # picking out runs of resampled outage periods
             run_start_index = 0
+            # TODO: store timestamps rather than indicies
+            # timestamps can be used to index the thresholded or original dataframe unambiguously
+            # might simplify some of the below code
             outage_period_resampled_indicies: list[tuple[int, int]] = []
             for i, time_gap_ns in enumerate(np.diff(county_resampled.index.values)):
+
                 if np.abs((float(time_gap_ns) / resample_period_ns) - 1) < 0.1:
                     continue
                 else:
@@ -150,20 +158,33 @@ rule identify_events:
             for period_indicies in outage_period_resampled_indicies:
 
                 start_i, end_i = period_indicies
-                n_periods: int = end_i - start_i
-                if n_periods > 1:
-                    # retrieve indicies of resampled run of outage periods
-                    event_start, *_ = county_resampled.iloc[start_i: end_i + 1].index
-                    events.append(
-                        (
-                            county_code,
-                            county_centroid.x,
-                            county_centroid.y,
-                            event_start.date(),
-                            (event_start - data_start).value / day_in_ns,
-                            n_periods,
-                        )
+
+                # N.B. resampled bins are time labelled left
+
+                # add one to n_periods to capture the last period, that would otherwise be missed
+                n_periods: int = end_i - start_i + 1
+
+                # retrieve indicies of resampled run of outage periods
+                outage_data: pd.Series = county_resampled.iloc[start_i: start_i + n_periods]["OutageFraction"]
+                event_start: pd.Timestamp = outage_data.index[0]
+                event_end: pd.Timestamp = outage_data.index[-1]
+
+                duration_hours: float = (event_end - event_start + pd.Timedelta(wildcards.RESAMPLE_FREQ)).total_seconds() / (60 * 60)
+                outage_magnitude: float = outage_data.sum()
+
+                events.append(
+                    (
+                        county_code,
+                        county_centroid.x,
+                        county_centroid.y,
+                        event_start,
+                        (event_start - data_start).value / day_in_ns,
+                        duration_hours,
+                        n_periods,
+                        period_indicies,
+                        outage_magnitude,
                     )
+                )
 
         events = pd.DataFrame(
             events,
@@ -173,7 +194,10 @@ rule identify_events:
                 "latitude",
                 "event_start",
                 "days_since_data_start",
+                "duration_hours",
                 "n_periods",
+                "period_indicies",
+                "integral",
             ]
         )
         events = events.sort_values("days_since_data_start").reset_index(drop=True)
