@@ -280,6 +280,7 @@ def plot_event(
     county_code: str,
     event_duration: pd.Timedelta,
     county_hourly: pd.DataFrame,
+    county_resampled: pd.DataFrame,
     counties: gpd.GeoDataFrame,
     states: pd.DataFrame,
     plot_dir: str
@@ -304,12 +305,24 @@ def plot_event(
         admin_str = f"{county_name}, {states.loc[int(state_code), 'state_alpha_2_code']}"
     except Exception as e:
         admin_str = f"{county_name}, ?"
-    timeseries = 1 - county_hourly.droplevel(1)
-    timeseries.plot(
+    county_hourly.plot(
         ax=ax,
         x_compat=True,  # enforce standard matplotlib date tick labelling "2023-09-21"
-        label="Outage timeseries",
+        label="Hourly timeseries",
     )
+    if len(county_hourly) != len(county_resampled):
+        ax.step(
+            county_resampled.index.values,
+            county_resampled.values,
+            label="Resampled timeseries",
+            where="post",
+        )
+        ax.fill_between(
+            county_resampled.index.values,
+            county_resampled.values,
+            step="post",
+            alpha=0.2,
+        )
 
     ax.set_ylabel("1 - Fraction of customers in county without power", labelpad=20)
     ax.set_xlabel("Time", labelpad=20)
@@ -318,10 +331,10 @@ def plot_event(
     ax.grid(alpha=0.3, which="both")
     duration_days: float = event_duration.total_seconds() / (60 * 60 * 24)
     ax.set_title(
-        f"POUS outage {admin_str}\n"
-        f"{duration_days:.2f} days"
+        f"{event_start} power outage event, {admin_str} ({county_code})\n"
+        f"{duration_days} days duration"
     )
-    ax.legend()
+    ax.legend(loc="lower right")
     filename = f"{event_start.date()}_{county_code}.png"
     filepath = os.path.join(plot_dir, filename)
     print(filepath)

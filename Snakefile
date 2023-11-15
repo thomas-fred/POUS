@@ -211,13 +211,13 @@ rule plot_events:
     input:
         events = rules.identify_events.output.events,
         hourly = "data/output/outage/1H/timeseries.pq",
+        resampled = "data/output/outage/{RESAMPLE_FREQ}/timeseries.pq",
         counties = "data/input/counties/cb_2018_us_county_500k.shp",
         states = "data/input/states/state_codes.csv",
     output:
         plots = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_plots")
     run:
         import os
-        import multiprocessing
 
         import geopandas as gpd
         import pandas as pd
@@ -230,45 +230,47 @@ rule plot_events:
         states = pd.read_csv(input.states)
         events = pd.read_parquet(input.events)
         hourly = pd.read_parquet(input.hourly)
+        if input.hourly == input.resampled:
+            resampled = hourly
+        else:
+            resampled = pd.read_parquet(input.resampled)
 
         os.makedirs(output.plots, exist_ok=True)
 
-        max_plot_length = "60D"
+        max_event_length = "60D"
+        min_event_length = "1D"
         start_buffer = "2D"
         end_buffer = "5D"
 
-        tasks = []
-        with multiprocessing.Pool(processes=workflow.cores) as pool:
-            for outage_attr in events.itertuples():
+        for outage_attr in events.itertuples():
 
-                event_duration = pd.Timedelta(wildcards.RESAMPLE_FREQ) * outage_attr.n_periods
-                if event_duration > pd.Timedelta(max_plot_length):
-                    print(f"{event_duration=} > {max_plot_length=} for {cluster_id=}, skipping")
-                    continue
+            event_duration = pd.Timedelta(wildcards.RESAMPLE_FREQ) * outage_attr.n_periods
 
-                event_start_datetime = pd.to_datetime(outage_attr.event_start)
-                plot_start: str = str((event_start_datetime - pd.Timedelta(start_buffer)).date())
-                event_end_datetime = event_start_datetime + event_duration
-                plot_end: str = str((event_end_datetime + pd.Timedelta(end_buffer)).date())
+            if event_duration > pd.Timedelta(max_event_length):
+                print(f"{event_duration=} > {max_event_length=}, skipping")
+                continue
 
-                print(outage_attr.event_start, outage_attr.CountyFIPS)
-                task = pool.apply_async(
-                    plot_event,
-                    (
-                        outage_threshold,
-                        event_start_datetime,
-                        event_end_datetime,
-                        outage_attr.CountyFIPS,
-                        event_duration,
-                        hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), "OutageFraction"],
-                        counties,
-                        states,
-                        output.plots
-                    )
-                )
-                tasks.append(task)
+            if event_duration < pd.Timedelta(min_event_length):
+                print(f"{event_duration=} < {min_event_length=}, skipping")
+                continue
 
-            [task.get() for task in tasks]
+            event_start_datetime = pd.to_datetime(outage_attr.event_start)
+            plot_start: str = str((event_start_datetime - pd.Timedelta(start_buffer)).date())
+            event_end_datetime = event_start_datetime + event_duration
+            plot_end: str = str((event_end_datetime + pd.Timedelta(end_buffer)).date())
+
+            plot_event(
+                outage_threshold,
+                event_start_datetime,
+                event_end_datetime,
+                outage_attr.CountyFIPS,
+                event_duration,
+                1 - hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), "OutageFraction"].droplevel(1),
+                1 - resampled.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), "OutageFraction"].droplevel(1),
+                counties,
+                states,
+                output.plots
+            )
 
 
 rule cluster_events:
