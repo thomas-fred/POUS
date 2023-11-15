@@ -101,7 +101,10 @@ rule identify_events:
         countries = "data/input/countries/ne_110m_admin_0_countries.shp",
     output:
         events = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/events.pq",
-        plot = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/events.png",
+        frequency_map = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_frequency_map.png",
+        duration_histogram = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_histogram.png",
+        integral_histogram = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_magnitude_histogram.png",
+        duration_magnitude_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_scatter.png",
     run:
         import matplotlib
         matplotlib.use("Agg")
@@ -225,7 +228,52 @@ rule identify_events:
         ax.set_ylim(22, 53)
         ax.set_ylabel("Latitude [deg]")
         ax.set_xlabel("Longitude [deg]")
-        f.savefig(output.plot)
+        f.savefig(output.frequency_map)
+
+        f, ax = plt.subplots(figsize=(12,8))
+        ax.hist(events.integral, bins=50, alpha=0.6)
+        ax.set_yscale("log")
+        ax.set_ylabel("Freqency")
+        ax.set_xlabel("Time-integrated outage magnitude")
+        ax.grid(alpha=0.2)
+        ax.set_title(
+            f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
+            f"Number of discrete county outage events: {len(events)}"
+        )
+        f.savefig(output.integral_histogram)
+
+        f, ax = plt.subplots(figsize=(12,8))
+        freq, bins, patches = ax.hist(events.duration_hours, bins=50, alpha=0.6, label="Distribution")
+
+        max_hours = events.duration_hours.max()
+        hour_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
+        for duration, label in duration_label:
+            if max_hours > duration:
+                ax.axvline(duration, ls="--")
+                ax.text(duration, 0.9 * max(freq), label, horizontalalignment="left", verticalalignment="top", rotation=90)
+
+        ax.set_yscale("log")
+        ax.set_ylabel("Freqency")
+        ax.set_xlabel("Outage duration [hours]")
+        ax.grid(alpha=0.2)
+        ax.set_title(
+            f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
+            f"Number of discrete county outage events: {len(events)}"
+        )
+        f.savefig(output.duration_histogram)
+
+        f, ax = plt.subplots(figsize=(12,8))
+        ax.scatter(events.duration_hours, events.integral, alpha=0.6)
+        ax.set_ylabel("Time-integrated outage magnitude")
+        ax.set_xlabel("Outage duration [hours]")
+        ax.set_yscale("log")
+        ax.set_xscale("log")
+        ax.grid(alpha=0.2)
+        ax.set_title(
+            f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
+            f"Number of discrete county outage events: {len(events)}"
+        )
+        f.savefig(output.duration_magnitude_scatter)
 
 
 rule plot_events:
