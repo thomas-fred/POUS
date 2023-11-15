@@ -103,7 +103,6 @@ rule identify_events:
         events = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/events.pq",
         frequency_map = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_frequency_map.png",
         duration_histogram = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_histogram.png",
-        integral_histogram = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_magnitude_histogram.png",
         duration_magnitude_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_scatter.png",
     run:
         import matplotlib
@@ -222,7 +221,17 @@ rule identify_events:
         counties = county_boundaries.loc[:, ["GEOID", "geometry"]].set_index("GEOID")
         outage_events_per_county = event_count.merge(counties, left_on="CountyFIPS", right_on="GEOID")
         outage_events_per_county = gpd.GeoDataFrame(outage_events_per_county)
-        outage_events_per_county.plot(column="n_periods", ax=ax, cmap=matplotlib.colormaps["spring"])
+        outage_events_per_county.plot(
+            column="n_periods",
+            ax=ax,
+            cmap=matplotlib.colormaps["spring"],
+            norm=matplotlib.colors.LogNorm(vmin=1, vmax=outage_events_per_county.n_periods.max()),
+            legend=True,
+            legend_kwds={
+                "label": "Number of periods county experienced outage",
+                "shrink": 0.83,
+            }
+        )
         usa.boundary.plot(ax=ax, alpha=0.5)
         ax.set_title(
             f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
@@ -236,27 +245,20 @@ rule identify_events:
         f.savefig(output.frequency_map)
 
         f, ax = plt.subplots(figsize=(12,8))
-        ax.hist(events.integral, bins=50, alpha=0.6)
-        ax.set_yscale("log")
-        ax.set_ylabel("Freqency")
-        ax.set_xlabel("Time-integrated outage magnitude")
-        ax.grid(alpha=0.2)
-        ax.set_title(
-            f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
-            f"Number of discrete county outage events: {len(events)}"
-        )
-        f.savefig(output.integral_histogram)
-
-        f, ax = plt.subplots(figsize=(12,8))
         freq, bins, patches = ax.hist(events.duration_hours, bins=50, alpha=0.6, label="Distribution")
-
         max_hours = events.duration_hours.max()
-        hour_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
+        duration_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
         for duration, label in duration_label:
             if max_hours > duration:
                 ax.axvline(duration, ls="--")
-                ax.text(duration, 0.9 * max(freq), label, horizontalalignment="left", verticalalignment="top", rotation=90)
-
+                ax.text(
+                    duration + 0.01 * max_hours,
+                    0.9 * max(freq),
+                    label,
+                    horizontalalignment="left",
+                    verticalalignment="top",
+                    rotation=90
+                )
         ax.set_yscale("log")
         ax.set_ylabel("Freqency")
         ax.set_xlabel("Outage duration [hours]")
@@ -268,8 +270,8 @@ rule identify_events:
         f.savefig(output.duration_histogram)
 
         f, ax = plt.subplots(figsize=(12,8))
-        ax.scatter(events.duration_hours, events.integral, alpha=0.6)
-        ax.set_ylabel("Time-integrated outage magnitude")
+        ax.scatter(events.duration_hours, events.integral / events.duration_hours, alpha=0.2)
+        ax.set_ylabel("Time-integrated outage magnitude / Outage duration")
         ax.set_xlabel("Outage duration [hours]")
         ax.set_yscale("log")
         ax.set_xscale("log")
@@ -342,6 +344,7 @@ rule plot_events:
                 event_end_datetime,
                 outage_attr.CountyFIPS,
                 event_duration,
+                outage_attr.integral,
                 1 - hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), "OutageFraction"].droplevel(1),
                 1 - resampled.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), "OutageFraction"].droplevel(1),
                 counties,

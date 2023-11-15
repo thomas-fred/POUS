@@ -279,6 +279,7 @@ def plot_event(
     event_end: datetime.date,
     county_code: str,
     event_duration: pd.Timedelta,
+    event_magnitude: float,
     county_hourly: pd.DataFrame,
     county_resampled: pd.DataFrame,
     counties: gpd.GeoDataFrame,
@@ -305,10 +306,11 @@ def plot_event(
         admin_str = f"{county_name}, {states.loc[int(state_code), 'state_alpha_2_code']}"
     except Exception as e:
         admin_str = f"{county_name}, ?"
-    county_hourly.plot(
-        ax=ax,
-        x_compat=True,  # enforce standard matplotlib date tick labelling "2023-09-21"
+    ax.step(
+        county_hourly.index.values,
+        county_hourly.values,
         label="Hourly timeseries",
+        where="post",
     )
     if len(county_hourly) != len(county_resampled):
         ax.step(
@@ -332,7 +334,7 @@ def plot_event(
     duration_days: float = event_duration.total_seconds() / (60 * 60 * 24)
     ax.set_title(
         f"{event_start} power outage event, {admin_str} ({county_code})\n"
-        f"{duration_days} days duration"
+        f"{duration_days} days duration, {event_magnitude:.2f} magnitude"
     )
     ax.legend(loc="lower right")
     filename = f"{event_start.date()}_{county_code}.png"
