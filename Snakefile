@@ -124,8 +124,9 @@ rule identify_events:
 
         data_start: pd.Timestamp = resampled.index.get_level_values(level="RecordDateTime").min()
 
-        resample_period_ns = pd.Timedelta(wildcards.RESAMPLE_FREQ).total_seconds() * 1E9
-        day_in_ns = 1E9 * 60 * 60 * 24
+        resample_period: pd.Timedelta = pd.Timedelta(wildcards.RESAMPLE_FREQ)
+        resample_period_ns: float = resample_period.total_seconds() * 1E9
+        day_in_ns: float = 1E9 * 60 * 60 * 24
 
         events = []
         for county_code in tqdm(resampled_outages.index.get_level_values("CountyFIPS").unique()):
@@ -141,39 +142,45 @@ rule identify_events:
                 continue
 
             # picking out runs of resampled outage periods
+            max_relative_timestep_error = 0.1
             run_start_index = 0
-            # TODO: store timestamps rather than indicies
-            # timestamps can be used to index the thresholded or original dataframe unambiguously
-            # might simplify some of the below code
-            outage_period_resampled_indicies: list[tuple[int, int]] = []
+            outages_start_end: list[tuple[pd.Timestamp, pd.Timestamp]] = []
             for i, time_gap_ns in enumerate(np.diff(county_resampled.index.values)):
 
-                if np.abs((float(time_gap_ns) / resample_period_ns) - 1) < 0.1:
+                if np.abs((float(time_gap_ns) / resample_period_ns) - 1) < max_relative_timestep_error:
                     continue
                 else:
-                    outage_period_resampled_indicies.append((run_start_index, i))
+                    # next timestep in thresholded outage data is not equal to resample period,
+                    # this is the end of an outage, record start and end datetimes
+                    run_start: pd.Timestamp = county_resampled.index[run_start_index]
+                    n_periods: int = i - run_start_index + 1
+                    run_end: pd.Timestamp = run_start + resample_period * n_periods
+                    outages_start_end.append((run_start, run_end))
+
+                    # reset start index (moving to next outage event)
                     run_start_index = i + 1
             else:
                 # store the last run which we'd otherwise miss
-                if np.abs((float(time_gap_ns) / resample_period_ns) - 1) < 0.1:
-                    outage_period_resampled_indicies.append((run_start_index, i))
+                if np.abs((float(time_gap_ns) / resample_period_ns) - 1) < max_relative_timestep_error:
+                    run_start: pd.Timestamp = county_resampled.index[run_start_index]
+                    n_periods: int = i - run_start_index + 1
+                    run_end: pd.Timestamp = run_start + resample_period * n_periods
+                    outages_start_end.append((run_start, run_end))
 
-            for period_indicies in outage_period_resampled_indicies:
-
-                start_i, end_i = period_indicies
+            # start of first outage bin (labelled left), end of last outage bin (label right)
+            for event_start, event_end in outages_start_end:
 
                 # N.B. resampled bins are time labelled left
 
-                # add one to n_periods to capture the last period, that would otherwise be missed
-                n_periods: int = end_i - start_i + 1
-
                 # retrieve indicies of resampled run of outage periods
-                outage_data: pd.Series = county_resampled.iloc[start_i: start_i + n_periods]["OutageFraction"]
-                event_start: pd.Timestamp = outage_data.index[0]
-                event_end: pd.Timestamp = outage_data.index[-1]
+                outage_data: pd.Series = county_resampled.loc[event_start: event_end]["OutageFraction"]
 
-                duration_hours: float = (event_end - event_start + pd.Timedelta(wildcards.RESAMPLE_FREQ)).total_seconds() / (60 * 60)
+                duration: pd.Timedelta = event_end - event_start
+                duration_hours: float = duration.total_seconds() / (60 * 60)
                 outage_magnitude: float = outage_data.sum()
+
+                n_periods = duration / resample_period
+                assert int(n_periods) == n_periods
 
                 events.append(
                     (
@@ -183,8 +190,7 @@ rule identify_events:
                         event_start,
                         (event_start - data_start).value / day_in_ns,
                         duration_hours,
-                        n_periods,
-                        period_indicies,
+                        int(n_periods),
                         outage_magnitude,
                     )
                 )
@@ -199,7 +205,6 @@ rule identify_events:
                 "days_since_data_start",
                 "duration_hours",
                 "n_periods",
-                "period_indicies",
                 "integral",
             ]
         )
