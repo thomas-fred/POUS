@@ -12,6 +12,7 @@ import matplotlib.dates as mdates
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import numpy as np
 import pandas as pd
+import snakemake
 
 from .admin import us_county_name
 
@@ -336,3 +337,88 @@ def plot_event(
     print(filepath)
     f.savefig(filepath)
     plt.close(f)
+
+
+def plot_events_summary(
+    wildcards: snakemake.io.Wildcards,
+    events: pd.DataFrame,
+    county_boundaries: gpd.GeoDataFrame,
+    usa: pd.Series,
+    frequency_map_path: str,
+    duration_histogram_path: str,
+    duration_magnitude_scatter_path: str,
+) -> None:
+    """
+    Plots that summarise identified events.
+    """
+
+    plt.style.use('dark_background')  # for cool points
+
+    events["geometry"] = gpd.points_from_xy(events.longitude, events.latitude)
+    events = gpd.GeoDataFrame(events)
+
+    f, ax = plt.subplots(figsize=(12,8))
+    event_count = events.loc[:, ["CountyFIPS", "n_periods"]].groupby("CountyFIPS").sum()
+    counties = county_boundaries.loc[:, ["GEOID", "geometry"]].set_index("GEOID")
+    outage_events_per_county = event_count.merge(counties, left_on="CountyFIPS", right_on="GEOID")
+    outage_events_per_county = gpd.GeoDataFrame(outage_events_per_county)
+    outage_events_per_county.plot(
+        column="n_periods",
+        ax=ax,
+        cmap=matplotlib.colormaps["spring"],
+        norm=matplotlib.colors.LogNorm(vmin=1, vmax=outage_events_per_county.n_periods.max()),
+        legend=True,
+        legend_kwds={
+            "label": "Number of periods county experienced outage",
+            "shrink": 0.83,
+        }
+    )
+    usa.boundary.plot(ax=ax, alpha=0.5)
+    ax.set_title(
+        f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
+        f"Number of discrete county outage events: {len(events)}"
+    )
+    ax.grid(alpha=0.2)
+    ax.set_xlim(-130, -65)
+    ax.set_ylim(22, 53)
+    ax.set_ylabel("Latitude [deg]")
+    ax.set_xlabel("Longitude [deg]")
+    f.savefig(frequency_map_path)
+
+    f, ax = plt.subplots(figsize=(12,8))
+    freq, bins, patches = ax.hist(events.duration_hours, bins=50, alpha=0.6, label="Distribution")
+    max_hours = events.duration_hours.max()
+    duration_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
+    for duration, label in duration_label:
+        if max_hours > duration:
+            ax.axvline(duration, ls="--")
+            ax.text(
+                duration + 0.01 * max_hours,
+                0.9 * max(freq),
+                label,
+                horizontalalignment="left",
+                verticalalignment="top",
+                rotation=90
+            )
+    ax.set_yscale("log")
+    ax.set_ylabel("Freqency")
+    ax.set_xlabel("Outage duration [hours]")
+    ax.grid(alpha=0.2)
+    ax.set_title(
+        f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
+        f"Number of discrete county outage events: {len(events)}"
+    )
+    f.savefig(duration_histogram_path)
+
+    f, ax = plt.subplots(figsize=(12,8))
+    ax.scatter(events.duration_hours, events.integral / events.duration_hours, alpha=0.2)
+    ax.set_ylabel("Time-integrated outage magnitude / Outage duration")
+    ax.set_xlabel("Outage duration [hours]")
+    ax.set_yscale("log")
+    ax.set_xscale("log")
+    ax.grid(alpha=0.2)
+    ax.set_title(
+        f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
+        f"Number of discrete county outage events: {len(events)}"
+    )
+    f.savefig(duration_magnitude_scatter_path)
