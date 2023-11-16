@@ -208,13 +208,10 @@ def plot_event_cluster(
         plot_end: str = str((event_end_datetime + pd.Timedelta(end_buffer)).date())
 
         county_hourly: pd.DataFrame = hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), :]
-        county_name, state_name, state_code = us_county_name(outage_attr.CountyFIPS, counties, states)
+        county_name, state_name, state_alpha_code = us_county_name(outage_attr.CountyFIPS, counties, states)
 
         # select our hourly data to plot
-        try:
-            label_str = f"{county_name}, {states.loc[int(state_code), 'state_alpha_2_code']}"
-        except Exception as e:
-            label_str = f"{county_name}, ?"
+        label_str = f"{county_name}, {state_alpha_code}"
         timeseries = 1 - county_hourly.droplevel(1).loc[:, "OutageFraction"]
         timeseries.plot(
             ax=ax,
@@ -299,13 +296,10 @@ def plot_event(
     ax.axvline(event_start, label="Event start", ls="--", color="green")
     ax.axvline(event_end, label="Event end", ls="--", color="red")
 
-    county_name, state_name, state_code = us_county_name(county_code, counties, states)
+    county_name, state_name, state_alpha_code = us_county_name(county_code, counties, states)
 
     # select our hourly data to plot
-    try:
-        admin_str = f"{county_name}, {states.loc[int(state_code), 'state_alpha_2_code']}"
-    except Exception as e:
-        admin_str = f"{county_name}, ?"
+    admin_str = f"{county_name}, {state_alpha_code}"
     ax.step(
         county_hourly.index.values,
         county_hourly.values,
