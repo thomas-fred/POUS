@@ -114,12 +114,15 @@ rule identify_events:
 
         from pous.plot import plot_events_summary
 
+        # county timeseries must have at least this duration (after a potential outage end)
+        # operating nominally before an outage may be considered over
+        min_time_nominal: pd.Timedelta = pd.Timedelta("2D")
+
         counties = gpd.read_file(input.counties)
         countries = gpd.read_file(input.countries)
 
         # take the resampled data and filter to periods with OutageFraction above a threshold
         resampled = pd.read_parquet(input.resampled, columns=["OutageFraction"])
-        resampled_outages = resampled[resampled.OutageFraction > float(wildcards.THRESHOLD)]
 
         data_start: pd.Timestamp = resampled.index.get_level_values(level="RecordDateTime").min()
 
@@ -131,48 +134,63 @@ rule identify_events:
             """Check two durations are within `rtol`."""
             return np.abs((period_a / period_b) - 1) < rtol
 
-        def start_end_datetimes(index: pd.DatetimeIndex, start_index: int, end_index: int) -> Tuple[pd.Timestamp, pd.Timestamp]:
+        def start_end_datetimes(index: pd.DatetimeIndex, start_index: int, end_index: int, period: pd.Timedelta) -> Tuple[pd.Timestamp, pd.Timestamp]:
             """Lookup the start (we label left) and end (we label right) times in `index`."""
-            run_start: pd.Timestamp = county_resampled.index[run_start_index]
-            # add one here to index the timestamp to the right of the end bin
-            n_periods: int = i - run_start_index + 1
-            run_end: pd.Timestamp = run_start + resample_period * n_periods
-            return run_start, run_end
+            return index[start_index], index[end_index] + period
+
+        def next_duration_nominal(outage_timeseries: pd.DataFrame, from_time: pd.Timestamp, duration: pd.Timedelta) -> bool:
+            """Check no outage states in `outage_timeseries` for `duration` from `from_time`."""
+            if outage_timeseries.loc[from_time: from_time + duration, :].empty:
+                return True
+            else:
+                return False
 
         events = []
-        for county_code in tqdm(resampled_outages.index.get_level_values("CountyFIPS").unique()):
+        for county_code in tqdm(resampled.index.get_level_values("CountyFIPS").unique()):
 
-            # lookup county
+            # all county data at this resampling period
+            county_resampled: pd.DataFrame = resampled.loc[(slice(None), county_code), :]
+            # county data at this resampling period in excess of outage threshold
+            county_resampled_outage: pd.DataFrame = county_resampled[county_resampled.OutageFraction > float(wildcards.THRESHOLD)]
+
+            # drop superfluous indicies
+            county_resampled: pd.DataFrame = county_resampled.reset_index(level="CountyFIPS")
+            county_resampled_outage: pd.DataFrame = county_resampled_outage.reset_index(level="CountyFIPS")
+
+            # lookup county geometry centroid
             county_centroid = counties.set_index("GEOID").loc[county_code].geometry.centroid
 
-            county_resampled: pd.DataFrame = resampled_outages.loc[(slice(None), county_code), :]
-            county_resampled = county_resampled.reset_index(level="CountyFIPS")
-
             # can't take a diff along one row
-            if len(county_resampled) < 2:
+            if len(county_resampled_outage) < 2:
                 continue
 
             # picking out runs of resampled outage periods
             run_start_index = 0
             outages_start_end: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-            for i, time_gap_ns in enumerate(np.diff(county_resampled.index.values)):
+            for i, time_gap_ns in enumerate(np.diff(county_resampled_outage.index.values)):
 
                 if approx_equal_period(float(time_gap_ns), resample_period_ns):
                     # the time period between these two resampled periods (in excess of the threshold)
                     # is approximately equal to the resampling period, ergo, this is a continued outage
                     continue
-                else:
-                    # next timestep in thresholded outage data is not equal to resample period,
-                    # this is the end of an outage, record start and end datetimes
-                    outages_start_end.append(start_end_datetimes(county_resampled.index, run_start_index, i))
 
-                    # reset start index (moving to next outage event)
-                    run_start_index = i + 1
+                else:
+                    if next_duration_nominal(county_resampled_outage, county_resampled_outage.index[i] + resample_period, min_time_nominal):
+                        # next timestep in thresholded outage data is not equal to resample period,
+                        # this is the end of an outage, record start and end datetimes
+                        outages_start_end.append(start_end_datetimes(county_resampled_outage.index, run_start_index, i, resample_period))
+
+                        # reset start index (moving to next outage event)
+                        run_start_index = i + 1
+                    else:
+                        # there is now a run of resampled periods in nominal state ahead of us,
+                        # but not enough to clear min_time_nominal, continue logging outage
+                        continue
 
             else:
                 # if we're still in an outage state at the end of the data, record it here
                 if approx_equal_period(float(time_gap_ns), resample_period_ns):
-                    outages_start_end.append(start_end_datetimes(county_resampled.index, run_start_index, i))
+                    outages_start_end.append(start_end_datetimes(county_resampled_outage.index, run_start_index, i, resample_period))
 
             # start of first outage bin (labelled left), end of last outage bin (labelled right)
             for event_start, event_end in outages_start_end:
@@ -180,7 +198,7 @@ rule identify_events:
                 # N.B. bins are generally time labelled left
 
                 # retrieve indicies of resampled run of outage periods
-                outage_data: pd.Series = county_resampled.loc[event_start: event_end]["OutageFraction"]
+                outage_data: pd.Series = county_resampled_outage.loc[event_start: event_end]["OutageFraction"]
 
                 duration: pd.Timedelta = event_end - event_start
                 duration_hours: float = duration.total_seconds() / (60 * 60)
@@ -269,9 +287,6 @@ rule plot_events:
         end_buffer = "5D"
 
         for outage_attr in events.itertuples():
-
-            if outage_attr.CountyFIPS != "39113":
-                continue
 
             event_duration = pd.Timedelta(wildcards.RESAMPLE_FREQ) * outage_attr.n_periods
 
