@@ -434,17 +434,15 @@ rule plot_clusters:
     output:
         plots = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/{TIME_DAYS}/{SPACE_DEG}/plots")
     run:
-        import multiprocessing
-        multiprocessing.set_start_method("spawn")
-
         import geopandas as gpd
         import pandas as pd
 
         from pous.plot import plot_event_cluster
 
+        min_events = 5
+
         print("Reading input data...")
         events = pd.read_parquet(input.clustered_events)
-        # generate a unique spatio-temporal cluster id
         events["cluster_id"] = events.apply(
             lambda row: tuple([row.time_cluster_id, int(row.geo_cluster_id)]),
             axis=1
@@ -458,25 +456,22 @@ rule plot_clusters:
         usa = countries[countries.ISO_A3 == "USA"]
 
         print("Plotting...")
-        task_results = []
-        with multiprocessing.Pool(processes=workflow.cores) as pool:
-            for cluster_id in events.cluster_id.unique():
-                county_codes = events[events.cluster_id == cluster_id].CountyFIPS.sort_values()
-                county_hourly = hourly.loc[(slice(None), county_codes), :].copy(deep=True)
-                task_result = pool.apply_async(
-                    plot_event_cluster,
-                    (
-                        cluster_id,
-                        events,
-                        county_hourly,
-                        float(wildcards.THRESHOLD),
-                        usa,
-                        wildcards.RESAMPLE_FREQ,
-                        counties,
-                        states,
-                        output.plots,
-                    )
-                )
-                task_results.append(task_result)
+        for cluster_id in events.cluster_id.unique():
+            county_codes = events[events.cluster_id == cluster_id].CountyFIPS.sort_values()
 
-            [task.get() for task in task_results]
+            if len(county_codes.unique()) < min_events:
+                # do not plot very small clusters
+                continue
+
+            county_hourly = hourly.loc[(slice(None), county_codes), :]
+            plot_event_cluster(
+                cluster_id,
+                events,
+                county_hourly,
+                float(wildcards.THRESHOLD),
+                usa,
+                wildcards.RESAMPLE_FREQ,
+                counties,
+                states,
+                output.plots,
+            )
