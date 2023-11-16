@@ -381,6 +381,7 @@ rule cluster_events:
         )
         dbscan.fit(distance)
         events["time_cluster_id"] = pd.Series(dbscan.labels_)
+        print(events.time_cluster_id.value_counts())
 
         # cluster in space
         def geo_cluster(lat: np.ndarray, long: np.ndarray, epsilon_deg, min_samples=1):
@@ -406,7 +407,16 @@ rule cluster_events:
 
         events.geo_cluster_id = events.geo_cluster_id.astype(int)
 
+        # generate a unique spatio-temporal cluster id
+        # don't save this with events, we can't easily deserialise it later (pyarrow casts to np.array)
+        cluster_id: pd.Series = events.apply(
+            lambda row: tuple([row.time_cluster_id, int(row.geo_cluster_id)]),
+            axis=1
+        )
+
         print(events)
+        events_per_cluster = cluster_id.value_counts()
+        print(events_per_cluster[events_per_cluster > 1])
         events.to_parquet(output.clusters, index=False)
 
 
