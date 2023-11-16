@@ -105,6 +105,8 @@ rule identify_events:
         duration_histogram = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_histogram.png",
         duration_magnitude_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_scatter.png",
     run:
+        from typing import Tuple
+
         import geopandas as gpd
         import numpy as np
         import pandas as pd
@@ -125,6 +127,18 @@ rule identify_events:
         resample_period_ns: float = resample_period.total_seconds() * 1E9
         day_in_ns: float = 1E9 * 60 * 60 * 24
 
+        def approx_equal_period(period_a: float, period_b: float, rtol: float = 0.1) -> bool:
+            """Check two durations are within `rtol`."""
+            return np.abs((period_a / period_b) - 1) < rtol
+
+        def start_end_datetimes(index: pd.DatetimeIndex, start_index: int, end_index: int) -> Tuple[pd.Timestamp, pd.Timestamp]:
+            """Lookup the start (we label left) and end (we label right) times in `index`."""
+            run_start: pd.Timestamp = county_resampled.index[run_start_index]
+            # add one here to index the timestamp to the right of the end bin
+            n_periods: int = i - run_start_index + 1
+            run_end: pd.Timestamp = run_start + resample_period * n_periods
+            return run_start, run_end
+
         events = []
         for county_code in tqdm(resampled_outages.index.get_level_values("CountyFIPS").unique()):
 
@@ -139,35 +153,31 @@ rule identify_events:
                 continue
 
             # picking out runs of resampled outage periods
-            max_relative_timestep_error = 0.1
             run_start_index = 0
             outages_start_end: list[tuple[pd.Timestamp, pd.Timestamp]] = []
             for i, time_gap_ns in enumerate(np.diff(county_resampled.index.values)):
 
-                if np.abs((float(time_gap_ns) / resample_period_ns) - 1) < max_relative_timestep_error:
+                if approx_equal_period(float(time_gap_ns), resample_period_ns):
+                    # the time period between these two resampled periods (in excess of the threshold)
+                    # is approximately equal to the resampling period, ergo, this is a continued outage
                     continue
                 else:
                     # next timestep in thresholded outage data is not equal to resample period,
                     # this is the end of an outage, record start and end datetimes
-                    run_start: pd.Timestamp = county_resampled.index[run_start_index]
-                    n_periods: int = i - run_start_index + 1
-                    run_end: pd.Timestamp = run_start + resample_period * n_periods
-                    outages_start_end.append((run_start, run_end))
+                    outages_start_end.append(start_end_datetimes(county_resampled.index, run_start_index, i))
 
                     # reset start index (moving to next outage event)
                     run_start_index = i + 1
-            else:
-                # store the last run which we'd otherwise miss
-                if np.abs((float(time_gap_ns) / resample_period_ns) - 1) < max_relative_timestep_error:
-                    run_start: pd.Timestamp = county_resampled.index[run_start_index]
-                    n_periods: int = i - run_start_index + 1
-                    run_end: pd.Timestamp = run_start + resample_period * n_periods
-                    outages_start_end.append((run_start, run_end))
 
-            # start of first outage bin (labelled left), end of last outage bin (label right)
+            else:
+                # if we're still in an outage state at the end of the data, record it here
+                if approx_equal_period(float(time_gap_ns), resample_period_ns):
+                    outages_start_end.append(start_end_datetimes(county_resampled.index, run_start_index, i))
+
+            # start of first outage bin (labelled left), end of last outage bin (labelled right)
             for event_start, event_end in outages_start_end:
 
-                # N.B. resampled bins are time labelled left
+                # N.B. bins are generally time labelled left
 
                 # retrieve indicies of resampled run of outage periods
                 outage_data: pd.Series = county_resampled.loc[event_start: event_end]["OutageFraction"]
