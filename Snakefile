@@ -242,8 +242,8 @@ rule plot_events_summary:
     output:
         frequency_map = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_frequency_map.png",
         duration_histogram = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_histogram.png",
-        duration_magnitude_norm_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_norm_scatter.png",
-        duration_magnitude_norm_significant_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_norm_significant_scatter.png",
+        duration_magnitude_norm_density = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_norm_density.png",
+        duration_magnitude_norm_significant_density = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_norm_significant_density.png",
     run:
         import geopandas as gpd
         import pandas as pd
@@ -261,8 +261,8 @@ rule plot_events_summary:
             countries[countries.ISO_A3 == "USA"],
             output.frequency_map,
             output.duration_histogram,
-            output.duration_magnitude_norm_scatter,
-            output.duration_magnitude_norm_significant_scatter,
+            output.duration_magnitude_norm_density,
+            output.duration_magnitude_norm_significant_density,
         )
 
 
@@ -302,6 +302,9 @@ rule plot_events:
         min_event_length = "1D"
         start_buffer = "2D"
         end_buffer = "5D"
+        min_norm_magnitude = 0.2
+
+        events["integral_norm"] = events.integral / events.duration_hours
 
         for outage_attr in events.itertuples():
 
@@ -313,6 +316,10 @@ rule plot_events:
 
             if event_duration < pd.Timedelta(min_event_length):
                 print(f"{event_duration=} < {min_event_length=}, skipping")
+                continue
+
+            if outage_attr.integral_norm < min_norm_magnitude:
+                print(f"{outage_attr.integral_norm:.3f=} < {min_norm_magnitude=}, skipping")
                 continue
 
             event_start_datetime = pd.to_datetime(outage_attr.event_start)

@@ -390,7 +390,7 @@ def plot_magnitude_duration_density(events: pd.DataFrame, wildcards: snakemake.i
     ax.grid(which="both", alpha=0.2)
     ax.set_title(
         f"Temporal binning: {wildcards.RESAMPLE_FREQ}, outage threshold: {wildcards.THRESHOLD}\n"
-        f"Number of discrete county outage events: {len(events):,}"
+        f"Number of county outage events: {len(events):,}"
     )
     f.savefig(path)
 
@@ -433,7 +433,7 @@ def plot_events_summary(
     usa.boundary.plot(ax=ax, alpha=0.5)
     ax.set_title(
         f"Temporal binning: {wildcards.RESAMPLE_FREQ}, outage threshold: {wildcards.THRESHOLD}\n"
-        f"Number of discrete county outage events: {len(events):,}"
+        f"Number of county outage events: {len(events):,}"
     )
     ax.grid(alpha=0.2)
     ax.set_xlim(-130, -65)
@@ -463,7 +463,7 @@ def plot_events_summary(
     ax.grid(alpha=0.2)
     ax.set_title(
         f"Temporal binning: {wildcards.RESAMPLE_FREQ}, outage threshold: {wildcards.THRESHOLD}\n"
-        f"Number of discrete county outage events: {len(events):,}"
+        f"Number of county outage events: {len(events):,}"
     )
     f.savefig(duration_histogram_path)
 
@@ -471,6 +471,6 @@ def plot_events_summary(
 
     plot_magnitude_duration_density(events, wildcards, duration_magnitude_norm_scatter_path,)
 
-    events = events[events.integral_norm > 0.1]
+    events = events[events.integral_norm > 0.05]
     events = events[events.duration_hours > 3]
     plot_magnitude_duration_density(events, wildcards, duration_magnitude_norm_significant_scatter_path)
