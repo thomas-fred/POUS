@@ -98,12 +98,8 @@ rule identify_events:
     input:
         resampled = rules.resample_outages.output.resampled,
         counties = "data/input/counties/cb_2018_us_county_500k.shp",
-        countries = "data/input/countries/ne_110m_admin_0_countries.shp",
     output:
         events = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/events.pq",
-        frequency_map = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_frequency_map.png",
-        duration_histogram = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_histogram.png",
-        duration_magnitude_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_scatter.png",
     run:
         from typing import Tuple
 
@@ -112,14 +108,11 @@ rule identify_events:
         import pandas as pd
         from tqdm import tqdm
 
-        from pous.plot import plot_events_summary
-
         # county timeseries must have at least this duration (after a potential outage end)
         # operating nominally before an outage may be considered over
         min_time_nominal: pd.Timedelta = pd.Timedelta("2D")
 
         counties = gpd.read_file(input.counties)
-        countries = gpd.read_file(input.countries)
 
         # take the resampled data and filter to periods with OutageFraction above a threshold
         resampled = pd.read_parquet(input.resampled, columns=["OutageFraction"])
@@ -190,7 +183,7 @@ rule identify_events:
             else:
                 # if we're still in an outage state at the end of the data, record it here
                 if approx_equal_period(float(time_gap_ns), resample_period_ns):
-                    outages_start_end.append(start_end_datetimes(county_resampled_outage.index, run_start_index, i, resample_period))
+                    outages_start_end.append(start_end_datetimes(county_resampled_outage.index, run_start_index, i + 1, resample_period))
 
             # start of first outage bin (labelled left), end of last outage bin (labelled right)
             for event_start, event_end in outages_start_end:
@@ -237,6 +230,30 @@ rule identify_events:
         print(events)
         events.to_parquet(output.events)
 
+
+rule plot_events_summary:
+    """
+    Plot maps, scatters and histograms of event set.
+    """
+    input:
+        events = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/events.pq",
+        counties = "data/input/counties/cb_2018_us_county_500k.shp",
+        countries = "data/input/countries/ne_110m_admin_0_countries.shp",
+    output:
+        frequency_map = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_frequency_map.png",
+        duration_histogram = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_histogram.png",
+        duration_magnitude_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_scatter.png",
+        duration_magnitude_norm_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_norm_scatter.png",
+    run:
+        import geopandas as gpd
+        import pandas as pd
+
+        from pous.plot import plot_events_summary
+
+        events = pd.read_parquet(input.events)
+        counties = gpd.read_file(input.counties)
+        countries = gpd.read_file(input.countries)
+
         plot_events_summary(
             wildcards,
             events,
@@ -245,8 +262,8 @@ rule identify_events:
             output.frequency_map,
             output.duration_histogram,
             output.duration_magnitude_scatter,
+            output.duration_magnitude_norm_scatter,
         )
-
 
 
 rule plot_events:

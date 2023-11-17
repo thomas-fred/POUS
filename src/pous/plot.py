@@ -294,6 +294,17 @@ def plot_event(
     f, ax = plt.subplots(figsize=(16, 10))
     ax.axhline(1 - outage_threshold, ls="--", color="white", label="Outage threshold")
 
+    # shade the area of the integral
+    outage_data = county_resampled.loc[event_start: event_end]
+    ax.fill_between(
+        outage_data.index,
+        outage_data,
+        np.ones_like(outage_data.values),
+        step="post",
+        alpha=0.4,
+        label="Outage"
+    )
+
     ax.axvline(event_start, label="Event start", ls="--", color="green")
     ax.axvline(event_end, label="Event end", ls="--", color="red")
 
@@ -314,12 +325,6 @@ def plot_event(
             label="Resampled timeseries",
             where="post",
         )
-        ax.fill_between(
-            county_resampled.index.values,
-            county_resampled.values,
-            step="post",
-            alpha=0.2,
-        )
 
     ax.set_ylabel("1 - Fraction of customers in county without power", labelpad=20)
     ax.set_xlabel("Time", labelpad=20)
@@ -329,7 +334,7 @@ def plot_event(
     duration_days: float = event_duration.total_seconds() / (60 * 60 * 24)
     ax.set_title(
         f"{event_start} power outage event, {admin_str} ({county_code})\n"
-        f"{duration_days} days duration, {event_magnitude:.2f} magnitude"
+        f"{duration_days:.2f} days duration, {event_magnitude:.2f} magnitude"
     )
     ax.legend(loc="lower right")
     filename = f"{event_start.date()}_{county_code}.png"
@@ -347,6 +352,7 @@ def plot_events_summary(
     frequency_map_path: str,
     duration_histogram_path: str,
     duration_magnitude_scatter_path: str,
+    duration_magnitude_norm_scatter_path: str,
 ) -> None:
     """
     Plots that summarise identified events.
@@ -369,14 +375,14 @@ def plot_events_summary(
         norm=matplotlib.colors.LogNorm(vmin=1, vmax=outage_events_per_county.n_periods.max()),
         legend=True,
         legend_kwds={
-            "label": "Number of periods county experienced outage",
-            "shrink": 0.83,
+            "label": f"Number of {wildcards.RESAMPLE_FREQ} periods county experienced outage",
+            "shrink": 0.82,
         }
     )
     usa.boundary.plot(ax=ax, alpha=0.5)
     ax.set_title(
-        f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
-        f"Number of discrete county outage events: {len(events)}"
+        f"Temporal binning: {wildcards.RESAMPLE_FREQ}, outage threshold: {wildcards.THRESHOLD}\n"
+        f"Number of discrete county outage events: {len(events):,}"
     )
     ax.grid(alpha=0.2)
     ax.set_xlim(-130, -65)
@@ -391,34 +397,96 @@ def plot_events_summary(
     duration_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
     for duration, label in duration_label:
         if max_hours > duration:
-            ax.axvline(duration, ls="--")
+            ax.axvline(duration, ls="--", alpha=0.5)
             ax.text(
                 duration + 0.01 * max_hours,
                 0.9 * max(freq),
                 label,
                 horizontalalignment="left",
                 verticalalignment="top",
-                rotation=90
+                rotation=90,
             )
     ax.set_yscale("log")
     ax.set_ylabel("Freqency")
     ax.set_xlabel("Outage duration [hours]")
     ax.grid(alpha=0.2)
     ax.set_title(
-        f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
-        f"Number of discrete county outage events: {len(events)}"
+        f"Temporal binning: {wildcards.RESAMPLE_FREQ}, outage threshold: {wildcards.THRESHOLD}\n"
+        f"Number of discrete county outage events: {len(events):,}"
     )
     f.savefig(duration_histogram_path)
 
     f, ax = plt.subplots(figsize=(12,8))
-    ax.scatter(events.duration_hours, events.integral / events.duration_hours, alpha=0.2)
-    ax.set_ylabel("Time-integrated outage magnitude / Outage duration")
+    ax.scatter(events.duration_hours, events.integral, alpha=0.3)
+    ax.set_ylabel("Time-integrated outage magnitude")
     ax.set_xlabel("Outage duration [hours]")
     ax.set_yscale("log")
     ax.set_xscale("log")
-    ax.grid(alpha=0.2)
+    max_hours = events.duration_hours.max()
+    duration_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
+    for duration, label in duration_label:
+        if max_hours > duration:
+            ax.axvline(duration, ls="--", alpha=0.5)
+            ax.text(
+                duration * 1.05,
+                0.9 * max(events.integral),
+                label,
+                horizontalalignment="left",
+                verticalalignment="top",
+                rotation=90,
+            )
+    ax.grid(which="both", alpha=0.2)
     ax.set_title(
-        f"Resample period: {wildcards.RESAMPLE_FREQ}, threshold: {wildcards.THRESHOLD}\n"
-        f"Number of discrete county outage events: {len(events)}"
+        f"Temporal binning: {wildcards.RESAMPLE_FREQ}, outage threshold: {wildcards.THRESHOLD}\n"
+        f"Number of discrete county outage events: {len(events):,}"
     )
     f.savefig(duration_magnitude_scatter_path)
+
+    f, ax = plt.subplots(figsize=(12,8))
+
+    integral_norm = events.integral / events.duration_hours
+    n_bins_x = int(np.round(np.cbrt(len(integral_norm))))
+
+    # run hexbinning once to find the counts per bin
+    g, g_ax = plt.subplots(figsize=(12, 8))
+    hexbin_counts = g_ax.hexbin(events.duration_hours, integral_norm, gridsize=n_bins_x, xscale="log", yscale="log").get_array()
+    plt.close(g)
+
+    cmap = matplotlib.colormaps["magma"]
+
+    # use the counts to run again with a colour normalisation that saturates at p95
+    hexbin = ax.hexbin(
+        events.duration_hours,
+        integral_norm,
+        gridsize=n_bins_x,
+        cmap=cmap,
+        xscale="log",
+        yscale="log",
+        norm=matplotlib.colors.LogNorm(
+            vmin=1,
+            vmax=np.quantile(hexbin_counts, 0.96)
+        ),
+        mincnt=1,
+    )
+    cbar = f.colorbar(hexbin, ax=ax, label='Frequency', extend="max")
+    ax.set_ylabel("Time-integrated outage magnitude / Outage duration")
+    ax.set_xlabel("Outage duration [hours]")
+    max_hours = events.duration_hours.max()
+    duration_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
+    for duration, label in duration_label:
+        if max_hours > duration:
+            ax.axvline(duration, ls="--", alpha=0.5)
+            ax.text(
+                duration * 1.05,
+                0.9 * integral_norm.max(),
+                label,
+                horizontalalignment="left",
+                verticalalignment="top",
+                rotation=90,
+            )
+    ax.grid(which="both", alpha=0.2)
+    ax.set_title(
+        f"Temporal binning: {wildcards.RESAMPLE_FREQ}, outage threshold: {wildcards.THRESHOLD}\n"
+        f"Number of discrete county outage events: {len(events):,}"
+    )
+    f.savefig(duration_magnitude_norm_scatter_path)
