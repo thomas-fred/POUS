@@ -27,7 +27,12 @@ def us_county_name(county_code: str, county_boundaries: gpd.GeoDataFrame, states
     # state lookup
     states: pd.DataFrame = states.set_index(states["state_fips_code"])
     state_code: str = county_admin_data.STATEFP
-    state_name: str = states.loc[int(state_code), "state_name"]
-    state_alpha_code: str = states.loc[int(state_code), "state_alpha_2_code"]
+    try:
+        state_name: str = states.loc[int(state_code), "state_name"]
+        state_alpha_code: str = states.loc[int(state_code), "state_alpha_2_code"]
+    except KeyError:
+        # STATEFP code is not in states data (Puerto Rico, among others)
+        state_name = "-"
+        state_alpha_code = "-"
 
     return county_name, state_name, state_alpha_code
