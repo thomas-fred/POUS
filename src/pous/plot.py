@@ -331,10 +331,10 @@ def plot_event(
     ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
     ax.set_ylim(-0.05, 1.1)
     ax.grid(alpha=0.3, which="both")
-    duration_days: float = event_duration.total_seconds() / (60 * 60 * 24)
+    duration_hours: float = event_duration.total_seconds() / (60 * 60)
     ax.set_title(
         f"{event_start} power outage event, {admin_str} ({county_code})\n"
-        f"{duration_days:.2f} days duration, {event_magnitude:.2f} magnitude"
+        f"{duration_hours:.2f} hours duration, {event_magnitude:.2f} magnitude, {event_magnitude / duration_hours:.2f} magnitude / duration"
     )
     ax.legend(loc="lower right")
     filename = f"{event_start.date()}_{county_code}.png"
@@ -344,6 +344,57 @@ def plot_event(
     plt.close(f)
 
 
+def plot_magnitude_duration_density(events: pd.DataFrame, wildcards: snakemake.io.Wildcards, path: str, xscale: str = "log") -> None:
+    """
+    Plot the event density of the duration normalised magnitude as a function of duration.
+    """
+    n_bins_x = int(np.round(np.cbrt(len(events))))
+
+    # run hexbinning once to find the counts per bin
+    g, g_ax = plt.subplots(figsize=(12, 8))
+    hexbin_counts = g_ax.hexbin(events.duration_hours, events.integral_norm, gridsize=n_bins_x, xscale=xscale, yscale="log").get_array()
+    plt.close(g)
+
+    f, ax = plt.subplots(figsize=(18,11))
+
+    # use the counts to run again with a colour normalisation that saturates at p95
+    hexbin = ax.hexbin(
+        events.duration_hours,
+        events.integral_norm,
+        gridsize=n_bins_x,
+        cmap=matplotlib.colormaps["magma"],
+        xscale=xscale,
+        yscale="log",
+        norm=matplotlib.colors.LogNorm(
+            vmin=1,
+            vmax=np.quantile(hexbin_counts, 0.96)
+        ),
+        mincnt=1,
+    )
+    cbar = f.colorbar(hexbin, ax=ax, label='Frequency', extend="max")
+    ax.set_ylabel("Time-integrated outage magnitude / Outage duration")
+    ax.set_xlabel("Outage duration [hours]")
+    max_hours = events.duration_hours.max()
+    duration_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
+    for duration, label in duration_label:
+        if max_hours > duration:
+            ax.axvline(duration, ls="--", alpha=0.5)
+            ax.text(
+                duration * 1.05,
+                0.9 * events.integral_norm.max(),
+                label,
+                horizontalalignment="left",
+                verticalalignment="top",
+                rotation=90,
+            )
+    ax.grid(which="both", alpha=0.2)
+    ax.set_title(
+        f"Temporal binning: {wildcards.RESAMPLE_FREQ}, outage threshold: {wildcards.THRESHOLD}\n"
+        f"Number of discrete county outage events: {len(events):,}"
+    )
+    f.savefig(path)
+
+
 def plot_events_summary(
     wildcards: snakemake.io.Wildcards,
     events: pd.DataFrame,
@@ -351,8 +402,8 @@ def plot_events_summary(
     usa: pd.Series,
     frequency_map_path: str,
     duration_histogram_path: str,
-    duration_magnitude_scatter_path: str,
     duration_magnitude_norm_scatter_path: str,
+    duration_magnitude_norm_significant_scatter_path: str,
 ) -> None:
     """
     Plots that summarise identified events.
@@ -416,77 +467,10 @@ def plot_events_summary(
     )
     f.savefig(duration_histogram_path)
 
-    f, ax = plt.subplots(figsize=(12,8))
-    ax.scatter(events.duration_hours, events.integral, alpha=0.3)
-    ax.set_ylabel("Time-integrated outage magnitude")
-    ax.set_xlabel("Outage duration [hours]")
-    ax.set_yscale("log")
-    ax.set_xscale("log")
-    max_hours = events.duration_hours.max()
-    duration_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
-    for duration, label in duration_label:
-        if max_hours > duration:
-            ax.axvline(duration, ls="--", alpha=0.5)
-            ax.text(
-                duration * 1.05,
-                0.9 * max(events.integral),
-                label,
-                horizontalalignment="left",
-                verticalalignment="top",
-                rotation=90,
-            )
-    ax.grid(which="both", alpha=0.2)
-    ax.set_title(
-        f"Temporal binning: {wildcards.RESAMPLE_FREQ}, outage threshold: {wildcards.THRESHOLD}\n"
-        f"Number of discrete county outage events: {len(events):,}"
-    )
-    f.savefig(duration_magnitude_scatter_path)
+    events["integral_norm"] = events.integral / events.duration_hours
 
-    f, ax = plt.subplots(figsize=(12,8))
+    plot_magnitude_duration_density(events, wildcards, duration_magnitude_norm_scatter_path,)
 
-    integral_norm = events.integral / events.duration_hours
-    n_bins_x = int(np.round(np.cbrt(len(integral_norm))))
-
-    # run hexbinning once to find the counts per bin
-    g, g_ax = plt.subplots(figsize=(12, 8))
-    hexbin_counts = g_ax.hexbin(events.duration_hours, integral_norm, gridsize=n_bins_x, xscale="log", yscale="log").get_array()
-    plt.close(g)
-
-    cmap = matplotlib.colormaps["magma"]
-
-    # use the counts to run again with a colour normalisation that saturates at p95
-    hexbin = ax.hexbin(
-        events.duration_hours,
-        integral_norm,
-        gridsize=n_bins_x,
-        cmap=cmap,
-        xscale="log",
-        yscale="log",
-        norm=matplotlib.colors.LogNorm(
-            vmin=1,
-            vmax=np.quantile(hexbin_counts, 0.96)
-        ),
-        mincnt=1,
-    )
-    cbar = f.colorbar(hexbin, ax=ax, label='Frequency', extend="max")
-    ax.set_ylabel("Time-integrated outage magnitude / Outage duration")
-    ax.set_xlabel("Outage duration [hours]")
-    max_hours = events.duration_hours.max()
-    duration_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
-    for duration, label in duration_label:
-        if max_hours > duration:
-            ax.axvline(duration, ls="--", alpha=0.5)
-            ax.text(
-                duration * 1.05,
-                0.9 * integral_norm.max(),
-                label,
-                horizontalalignment="left",
-                verticalalignment="top",
-                rotation=90,
-            )
-    ax.grid(which="both", alpha=0.2)
-    ax.set_title(
-        f"Temporal binning: {wildcards.RESAMPLE_FREQ}, outage threshold: {wildcards.THRESHOLD}\n"
-        f"Number of discrete county outage events: {len(events):,}"
-    )
-    f.savefig(duration_magnitude_norm_scatter_path)
+    events = events[events.integral_norm > 0.1]
+    events = events[events.duration_hours > 3]
+    plot_magnitude_duration_density(events, wildcards, duration_magnitude_norm_significant_scatter_path)

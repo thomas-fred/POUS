@@ -242,8 +242,8 @@ rule plot_events_summary:
     output:
         frequency_map = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_frequency_map.png",
         duration_histogram = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_histogram.png",
-        duration_magnitude_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_scatter.png",
         duration_magnitude_norm_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_norm_scatter.png",
+        duration_magnitude_norm_significant_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_duration_magnitude_norm_significant_scatter.png",
     run:
         import geopandas as gpd
         import pandas as pd
@@ -261,8 +261,8 @@ rule plot_events_summary:
             countries[countries.ISO_A3 == "USA"],
             output.frequency_map,
             output.duration_histogram,
-            output.duration_magnitude_scatter,
             output.duration_magnitude_norm_scatter,
+            output.duration_magnitude_norm_significant_scatter,
         )
 
 
