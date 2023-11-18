@@ -58,7 +58,9 @@ rule resample_outages:
         import pandas as pd
         from tqdm import tqdm
 
-        hourly_with_gaps = pd.concat([pd.read_parquet(path, columns=["OutageFraction"]) for path in input.years])
+        hourly_with_gaps = pd.concat(
+            [pd.read_parquet(path, columns=["OutageFraction", "CustomersTracked"]) for path in input.years]
+        )
         counties = sorted(hourly_with_gaps.index.get_level_values("CountyFIPS").unique())
 
         datetimes = hourly_with_gaps.index.get_level_values(0)
@@ -91,13 +93,36 @@ rule resample_outages:
         resampled.to_parquet(output.resampled)
 
 
+rule parse_county_population:
+    """
+    Parse the US census county population data.
+    """
+    input:
+        data = "data/input/counties/population/co-est2022-alldata.csv",
+    output:
+        parsed = "data/input/counties/population/2022.pq"
+    run:
+        import pandas as pd
+
+        data = pd.read_csv(input.data, usecols=["SUMLEV", "STATE", "COUNTY", "CTYNAME", "POPESTIMATE2022"])
+        data = data.rename(columns={"CTYNAME": "CountyName", "POPESTIMATE2022": "CountyPop2022"})
+
+        # filter to only county rows (remove e.g. state total rows)
+        data = data[data.SUMLEV == 50]
+        data = data.drop(columns=["SUMLEV"])
+
+        data["CountyFIPS"] = data.apply(lambda row: f"{row.STATE:02d}{row.COUNTY:03d}", axis=1).astype(str)
+        data.loc[:, ["CountyFIPS", "CountyPop2022", "CountyName"]].to_parquet(output.parsed)
+
+
 rule identify_events:
     """
     Look for events where OutageFraction exceeded threshold in resampled data.
     """
     input:
         resampled = rules.resample_outages.output.resampled,
-        counties = "data/input/counties/cb_2018_us_county_500k.shp",
+        counties = "data/input/counties/geometry/cb_2018_us_county_500k.shp",
+        county_pop = rules.parse_county_population.output.parsed,
     output:
         events = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/events.pq",
     run:
@@ -112,10 +137,17 @@ rule identify_events:
         # operating nominally before an outage may be considered over
         min_time_nominal: pd.Timedelta = pd.Timedelta("2D")
 
+        # duration before outage start to compute average CustomersTracked for
+        pre_outage_window: pd.Timedelta = pd.Timedelta("1W")
+
         counties = gpd.read_file(input.counties)
+        county_pop = pd.read_parquet(input.county_pop)
+        # annotate counties table with population data, `CountyPop2022`
+        counties = counties.merge(county_pop, left_on="GEOID", right_on="CountyFIPS").drop(columns=["CountyFIPS", "CountyName"])
+        counties = counties.set_index("GEOID")
 
         # take the resampled data and filter to periods with OutageFraction above a threshold
-        resampled = pd.read_parquet(input.resampled, columns=["OutageFraction"])
+        resampled = pd.read_parquet(input.resampled, columns=["OutageFraction", "CustomersTracked"])
 
         data_start: pd.Timestamp = resampled.index.get_level_values(level="RecordDateTime").min()
 
@@ -151,7 +183,11 @@ rule identify_events:
             county_resampled_outage: pd.DataFrame = county_resampled_outage.reset_index(level="CountyFIPS")
 
             # lookup county geometry centroid
-            county_centroid = counties.set_index("GEOID").loc[county_code].geometry.centroid
+            try:
+                county_centroid = counties.loc[county_code].geometry.centroid
+                county_pop = counties.loc[county_code].CountyPop2022
+            except KeyError:
+                print(f"Missing {county_code=}, skipping...")
 
             # can't take a diff along one row
             if len(county_resampled_outage) < 2:
@@ -190,21 +226,29 @@ rule identify_events:
 
                 # N.B. bins are generally time labelled left
 
-                # retrieve indicies of resampled run of outage periods
-                outage_data: pd.Series = county_resampled_outage.loc[event_start: event_end]["OutageFraction"]
+                pre_outage_window_start = pd.to_datetime(event_start) - pre_outage_window
+                pre_outage_tracked_customers: float = county_resampled_outage.loc[pre_outage_window_start: event_start, "CustomersTracked"].mean()
 
                 duration: pd.Timedelta = event_end - event_start
                 duration_hours: float = duration.total_seconds() / (60 * 60)
-                outage_magnitude: float = outage_data.sum()
+                outage_magnitude: float = county_resampled_outage.loc[event_start: event_end, "OutageFraction"].sum()
 
                 n_periods = duration / resample_period
                 assert int(n_periods) == n_periods
+
+                # ensure the number of tracked customers is no less than 5% of the county population
+                # note that customers are very likely households, not inhabitants
+                if pre_outage_tracked_customers / county_pop < 0.05:
+                    # event has very few tracked customers relative to county population, discard
+                    continue
 
                 events.append(
                     (
                         county_code,
                         county_centroid.x,
                         county_centroid.y,
+                        county_pop,
+                        pre_outage_tracked_customers,
                         event_start,
                         (event_start - data_start).value / day_in_ns,
                         duration_hours,
@@ -219,6 +263,8 @@ rule identify_events:
                 "CountyFIPS",
                 "longitude",
                 "latitude",
+                "county_pop",
+                "pre_outage_tracked_customers",
                 "event_start",
                 "days_since_data_start",
                 "duration_hours",
@@ -237,7 +283,7 @@ rule plot_events_summary:
     """
     input:
         events = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/events.pq",
-        counties = "data/input/counties/cb_2018_us_county_500k.shp",
+        counties = "data/input/counties/geometry/cb_2018_us_county_500k.shp",
         countries = "data/input/countries/ne_110m_admin_0_countries.shp",
     output:
         frequency_map = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_frequency_map.png",
@@ -274,7 +320,7 @@ rule plot_events:
         events = rules.identify_events.output.events,
         hourly = "data/output/outage/1H/timeseries.pq",
         resampled = "data/output/outage/{RESAMPLE_FREQ}/timeseries.pq",
-        counties = "data/input/counties/cb_2018_us_county_500k.shp",
+        counties = "data/input/counties/geometry/cb_2018_us_county_500k.shp",
         states = "data/input/states/state_codes.csv",
     output:
         plots = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/event_plots")
@@ -319,7 +365,7 @@ rule plot_events:
                 continue
 
             if outage_attr.integral_norm < min_norm_magnitude:
-                print(f"{outage_attr.integral_norm:.3f=} < {min_norm_magnitude=}, skipping")
+                print(f"{outage_attr.integral_norm=:.3f} < {min_norm_magnitude=}, skipping")
                 continue
 
             event_start_datetime = pd.to_datetime(outage_attr.event_start)
@@ -417,7 +463,7 @@ rule plot_clusters:
     input:
         clustered_events = rules.cluster_events.output.clusters,
         hourly = "data/output/outage/1H/timeseries.pq",
-        counties = "data/input/counties/cb_2018_us_county_500k.shp",
+        counties = "data/input/counties/geometry/cb_2018_us_county_500k.shp",
         states = "data/input/states/state_codes.csv",
         countries = "data/input/countries/ne_110m_admin_0_countries.shp",
     output:
