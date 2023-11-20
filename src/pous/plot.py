@@ -170,41 +170,26 @@ def map_outage(outage: gpd.GeoDataFrame, event_name: str, n_cpu: int, title: str
 
 
 def plot_event_cluster(
-    cluster_name: Any,
+    cluster_name: str,
     cluster: pd.DataFrame,
-    hourly: pd.DataFrame,
-    outage_threshold: float,
+    pop_affected: pd.DataFrame,
     country: gpd.GeoDataFrame,
-    resample_freq: str,
     counties: gpd.GeoDataFrame,
-    states: pd.DataFrame,
     plot_dir: str,
 ):
 
     plt.style.use('dark_background')  # for cool points
-
-    max_plot_length = "60D"
-    start_buffer = "2D"
-    end_buffer = "3D"
     cmap = matplotlib.colormaps['spring']
 
     f, ax = plt.subplots(figsize=(16, 8))
 
-    plot_start = cluster.event_start.min() - pd.Timedelta(start_buffer)
-    plot_end = (cluster.event_start + cluster.duration_hours.apply(lambda d: d * pd.Timedelta("1H"))).max() + pd.Timedelta(end_buffer)
-    event_duration = plot_end - plot_start
+    plot_start = pop_affected.index.min()
+    plot_end = pop_affected.index.max()
 
-    if event_duration > pd.Timedelta(max_plot_length):
-        print(f"{event_duration=} > {max_plot_length=} for {cluster_name=}, skipping")
-        return
-
-    county_hourly: pd.DataFrame = hourly.loc[(slice(plot_start, plot_end), cluster.CountyFIPS.unique()), ["OutageFraction"]]
-    county_population: pd.Series = cluster.loc[cluster.CountyFIPS.drop_duplicates().index].set_index("CountyFIPS").loc[:, "county_pop"]
-    pop_affected: pd.DataFrame = county_hourly.mul(county_population, level="CountyFIPS", axis="index")
-    pop_affected = pop_affected.reset_index(level=1).pivot(columns=["CountyFIPS"])
     pop_affected.plot(
         stacked=True,
         legend=False,
+        x_compat=True,  # daily x ticks
         ax=ax,
         cmap=cmap,
         alpha=0.5,
@@ -219,7 +204,7 @@ def plot_event_cluster(
     peak_pop_affected: int = int(np.round(pop_affected.sum(axis=1).max()))
     pop_hours_lost: int = int(np.round(cluster.pop_hours_supply_lost.sum()))
     ax.set_title(
-        f"Outage cluster {cluster_name}\n"
+        f"Outage cluster {cluster_name}\n\n"
         f"Peak population affected: {peak_pop_affected:,d}\n"
         f"Person-hours supply lost: {pop_hours_lost:,d}"
     )
@@ -229,8 +214,13 @@ def plot_event_cluster(
     # inset map of county centres
     ax_map = f.add_axes([0.62, 0.66, 0.4, 0.3])
     affected_counties = counties[counties.GEOID.isin(cluster.CountyFIPS)]
-    affected_counties.plot(
-        color="white",
+    affected_counties.loc[:, ["GEOID", "geometry"]].merge(
+        cluster.loc[:, ["CountyFIPS", "days_since_data_start"]],
+        left_on="GEOID",
+        right_on="CountyFIPS"
+    ).plot(
+        column="days_since_data_start",
+        cmap="Blues",
         ax=ax_map
     )
     country.boundary.plot(ax=ax_map, alpha=0.5)

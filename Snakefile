@@ -316,9 +316,11 @@ rule plot_events_summary:
         )
 
 
-rule plot_storm_events:
+rule cluster_events_by_storm:
     """
-    Plot maps, scatters and histograms of event set.
+    Join event set with storm track data, plot outages associated with each storm.
+
+    Save aggregate outage statistics for storms.
     """
     input:
         events = rules.identify_events.output.events,
@@ -328,9 +330,11 @@ rule plot_storm_events:
         states = "data/input/states/state_codes.csv",
         countries = "data/input/countries/ne_110m_admin_0_countries.shp",
     output:
-        plots = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_event_plots"),
+        plots = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_cluster_plots"),
+        storm_clusters = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_clusters.gpq",
     run:
         import geopandas as gpd
+        import numpy as np
         import pandas as pd
         import shapely
 
@@ -360,40 +364,108 @@ rule plot_storm_events:
         os.makedirs(output.plots, exist_ok=True)
 
         print("Plotting...")
+        storm_clusters = []
         for track_id, track in tracks.groupby(tracks.track_id):
-
-            plot_start = track.index.min()
-            plot_end = track.index.max()
 
             try:
                 track_line = gpd.GeoDataFrame({"geometry": shapely.LineString(track.geometry)}, index=[0])
             except shapely.errors.GEOSException:
                 continue
 
-            track_line["geometry"] = track_line.geometry.buffer(2)
+            track_line_buffered = track_line.copy(deep=True)
+            track_line_buffered["geometry"] = track_line.geometry.buffer(2)
 
-            cluster = events.loc[plot_start: plot_end].sjoin(track_line).reset_index()
+            plot_start = track.index.min() - pd.Timedelta("2D")
+
+            # find events spatially within buffered track polygon
+            # then filter to those starting between start of track and 1 week after end of track
+            cluster = events.loc[plot_start: track.index.max() + pd.Timedelta("1W")].sjoin(track_line_buffered).reset_index()
 
             if cluster.empty:
                 print(f"No intersection for {track_id=}, skipping...")
                 continue
 
-            county_codes = cluster.CountyFIPS.sort_values()
-
             storm_name, = track.name.drop_duplicates()
 
-            county_hourly = hourly.loc[(slice(None), county_codes), :]
+            # time 3 days after end of last county-outage event
+            plot_end = (cluster.event_start + cluster.duration_hours.apply(lambda d: d * pd.Timedelta("1H"))).max() + pd.Timedelta("3D")
+
+            county_hourly: pd.DataFrame = hourly.loc[(slice(plot_start, plot_end), cluster.CountyFIPS.unique()), ["OutageFraction"]]
+            county_population: pd.Series = cluster.loc[cluster.CountyFIPS.drop_duplicates().index].set_index("CountyFIPS").loc[:, "county_pop"]
+            pop_affected: pd.DataFrame = county_hourly.mul(county_population, level="CountyFIPS", axis="index")
+            pop_affected = pop_affected.reset_index(level=1).pivot(columns=["CountyFIPS"])
+
+            peak_pop_affected: int = int(np.round(pop_affected.sum(axis=1).max()))
+            pop_hours_lost: int = int(np.round(cluster.pop_hours_supply_lost.sum()))
+
+            storm_clusters.append(
+                (
+                    storm_name,
+                    track_id,
+                    plot_start,
+                    peak_pop_affected,
+                    pop_hours_lost,
+                    track_line.geometry.iloc[0],
+                )
+            )
+
             plot_event_cluster(
                 storm_name,
                 cluster,
-                county_hourly,
-                float(wildcards.THRESHOLD),
+                pop_affected,
                 usa,
-                wildcards.RESAMPLE_FREQ,
                 counties,
-                states,
                 output.plots,
             )
+
+        storm_clusters = gpd.GeoDataFrame(
+            storm_clusters,
+            columns=[
+                "storm_name",
+                "track_id",
+                "start_date",
+                "peak_pop_affected",
+                "pop_hours_supply_lost",
+                "geometry",
+            ]
+        )
+        storm_clusters.to_parquet(output.storm_clusters)
+
+
+rule plot_storm_events_bar_chart:
+    """
+    Plot bar chart of person-hours of lost supply due to storms.
+    """
+    input:
+        storm_clusters = rules.cluster_events_by_storm.output.storm_clusters,
+    output:
+        bar_chart = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_clusters_hours_lost.png",
+    run:
+        import geopandas as gpd
+        import pandas as pd
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        plt.style.use('dark_background')  # for cool points
+
+        events = gpd.read_parquet(input.storm_clusters)
+        events["name_year"] = events.apply(lambda row: f"{row.storm_name}, {row.start_date.year}", axis=1)
+        events = events.set_index("name_year").sort_values("pop_hours_supply_lost")
+        events = events[events.pop_hours_supply_lost > 1E6]
+
+        f, ax = plt.subplots(figsize=(16, 8))
+        events.pop_hours_supply_lost.plot(kind="bar", ax=ax)
+        ax.bar_label(ax.containers[0], fmt="%.2E", rotation=90, padding=10)
+        ax.set_title("Largest storm-induced electricity outages")
+        ax.set_yscale("log")
+        ax.set_xlabel("Storm", labelpad=10)
+        ax.set_ylabel("Electricity supply lost [person-hours]", labelpad=20)
+        ax.grid(which="both", alpha=0.2)
+        ymin, ymax = ax.get_ylim()
+        ax.set_ylim(ymin, 5 * ymax)
+        plt.subplots_adjust(bottom=0.3, top=0.9, left=0.1, right=0.9)
+        f.savefig(output.bar_chart)
 
 
 rule plot_events:
