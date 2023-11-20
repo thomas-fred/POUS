@@ -316,6 +316,86 @@ rule plot_events_summary:
         )
 
 
+rule plot_storm_events:
+    """
+    Plot maps, scatters and histograms of event set.
+    """
+    input:
+        events = rules.identify_events.output.events,
+        hourly = "data/output/outage/1H/timeseries.pq",
+        storm_tracks = "data/input/storm_tracks/IBTrACS.gpq",
+        counties = "data/input/counties/geometry/cb_2018_us_county_500k.shp",
+        states = "data/input/states/state_codes.csv",
+        countries = "data/input/countries/ne_110m_admin_0_countries.shp",
+    output:
+        plots = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_event_plots"),
+    run:
+        import geopandas as gpd
+        import pandas as pd
+        import shapely
+
+        from pous.plot import plot_event_cluster
+
+        print("Reading input data...")
+        events = pd.read_parquet(input.events)
+        tracks = gpd.read_parquet(input.storm_tracks)
+        counties = gpd.read_file(input.counties)
+        countries = gpd.read_file(input.countries)
+        states = pd.read_csv(input.states)
+        hourly = pd.read_parquet(input.hourly)
+
+        # filter to relevant timespan
+        tracks = tracks.sort_index().loc[str(min(YEARS)): str(max(YEARS))]
+
+        # filter spatially
+        usa = countries[countries.ISO_A3 == "USA"]
+        aoi_buffer_deg = 5
+        area_of_interest, = usa.geometry.buffer(aoi_buffer_deg).values
+        tracks = tracks[tracks.within(area_of_interest)]
+
+        events["geometry"] = gpd.points_from_xy(events.longitude, events.latitude)
+        events = gpd.GeoDataFrame(events.drop(columns=["longitude", "latitude"]))
+        events = events.set_index("event_start").sort_index()
+
+        os.makedirs(output.plots, exist_ok=True)
+
+        print("Plotting...")
+        for track_id, track in tracks.groupby(tracks.track_id):
+
+            plot_start = track.index.min()
+            plot_end = track.index.max()
+
+            try:
+                track_line = gpd.GeoDataFrame({"geometry": shapely.LineString(track.geometry)}, index=[0])
+            except shapely.errors.GEOSException:
+                continue
+
+            track_line["geometry"] = track_line.geometry.buffer(2)
+
+            cluster = events.loc[plot_start: plot_end].sjoin(track_line).reset_index()
+
+            if cluster.empty:
+                print(f"No intersection for {track_id=}, skipping...")
+                continue
+
+            county_codes = cluster.CountyFIPS.sort_values()
+
+            storm_name, = track.name.drop_duplicates()
+
+            county_hourly = hourly.loc[(slice(None), county_codes), :]
+            plot_event_cluster(
+                storm_name,
+                cluster,
+                county_hourly,
+                float(wildcards.THRESHOLD),
+                usa,
+                wildcards.RESAMPLE_FREQ,
+                counties,
+                states,
+                output.plots,
+            )
+
+
 rule plot_events:
     """
     Plot county-event timeseries (no event clustering). Overlay inferred durations.
@@ -384,6 +464,7 @@ rule plot_events:
                 outage_attr.CountyFIPS,
                 event_duration,
                 outage_attr.integral,
+                outage_attr.pop_hours_supply_lost,
                 1 - hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), "OutageFraction"].droplevel(1),
                 1 - resampled.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), "OutageFraction"].droplevel(1),
                 counties,
@@ -407,8 +488,18 @@ rule cluster_events:
         import pandas as pd
         from sklearn.cluster import DBSCAN
 
+        min_integral_norm: float = 0.05
+
         # create matrix of pairwise distance in time between events
         events = pd.read_parquet(input.events)
+        print(f"{len(events)=}")
+
+        # filter events
+        events["integral_norm"] = events.integral / events.duration_hours
+        print(f"Filtering to events with {min_integral_norm=} or greater")
+        events = events[events.integral_norm >= min_integral_norm]
+        print(f"{len(events)=}")
+
         arr = events.days_since_data_start.values
         distance = np.abs(arr - arr[:, None])
 
@@ -444,12 +535,15 @@ rule cluster_events:
                 float(wildcards.SPACE_DEG),  # epsilon degrees
             )
 
+        events = events[~events.time_cluster_id.isna()]
+        events.time_cluster_id = events.time_cluster_id.astype(int)
+        events = events[~events.geo_cluster_id.isna()]
         events.geo_cluster_id = events.geo_cluster_id.astype(int)
 
         # generate a unique spatio-temporal cluster id
         # don't save this with events, we can't easily deserialise it later (pyarrow casts to np.array)
         cluster_id: pd.Series = events.apply(
-            lambda row: tuple([row.time_cluster_id, int(row.geo_cluster_id)]),
+            lambda row: tuple([row.time_cluster_id, row.geo_cluster_id]),
             axis=1
         )
 
@@ -478,7 +572,8 @@ rule plot_clusters:
 
         from pous.plot import plot_event_cluster
 
-        min_events = 5
+        min_counties = 5
+        min_affected_person_hours = 1E5
 
         print("Reading input data...")
         events = pd.read_parquet(input.clustered_events)
@@ -496,16 +591,22 @@ rule plot_clusters:
 
         print("Plotting...")
         for cluster_id in events.cluster_id.unique():
-            county_codes = events[events.cluster_id == cluster_id].CountyFIPS.sort_values()
 
-            if len(county_codes.unique()) < min_events:
+            cluster = events[events.cluster_id == cluster_id]
+            county_codes = cluster.CountyFIPS.sort_values()
+
+            if len(county_codes.unique()) < min_counties:
                 # do not plot very small clusters
+                continue
+
+            if cluster.pop_hours_supply_lost.sum() < min_affected_person_hours:
+                # do not plot clusters with very few affected customers
                 continue
 
             county_hourly = hourly.loc[(slice(None), county_codes), :]
             plot_event_cluster(
                 cluster_id,
-                events,
+                cluster,
                 county_hourly,
                 float(wildcards.THRESHOLD),
                 usa,

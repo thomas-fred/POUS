@@ -1,6 +1,7 @@
 import datetime
 import os
 import multiprocess
+from typing import Any
 import warnings
 
 import geopandas as gpd
@@ -169,8 +170,8 @@ def map_outage(outage: gpd.GeoDataFrame, event_name: str, n_cpu: int, title: str
 
 
 def plot_event_cluster(
-    cluster_id: tuple[int, int],
-    events: pd.DataFrame,
+    cluster_name: Any,
+    cluster: pd.DataFrame,
     hourly: pd.DataFrame,
     outage_threshold: float,
     country: gpd.GeoDataFrame,
@@ -184,73 +185,52 @@ def plot_event_cluster(
 
     max_plot_length = "60D"
     start_buffer = "2D"
-    end_buffer = "5D"
+    end_buffer = "3D"
     cmap = matplotlib.colormaps['spring']
 
-    if -1 in cluster_id:
-        return  # couldn't cluster, usually noise
+    f, ax = plt.subplots(figsize=(16, 8))
 
-    cluster = events[events.cluster_id == cluster_id]
+    plot_start = cluster.event_start.min() - pd.Timedelta(start_buffer)
+    plot_end = (cluster.event_start + cluster.duration_hours.apply(lambda d: d * pd.Timedelta("1H"))).max() + pd.Timedelta(end_buffer)
+    event_duration = plot_end - plot_start
 
-    f, ax = plt.subplots(figsize=(16, 10))
-    ax.axhline(1 - outage_threshold, ls="--", color="white", label="Outage threshold")
+    if event_duration > pd.Timedelta(max_plot_length):
+        print(f"{event_duration=} > {max_plot_length=} for {cluster_name=}, skipping")
+        return
 
-    for outage_attr in cluster.itertuples():
+    county_hourly: pd.DataFrame = hourly.loc[(slice(plot_start, plot_end), cluster.CountyFIPS.unique()), ["OutageFraction"]]
+    county_population: pd.Series = cluster.loc[cluster.CountyFIPS.drop_duplicates().index].set_index("CountyFIPS").loc[:, "county_pop"]
+    pop_affected: pd.DataFrame = county_hourly.mul(county_population, level="CountyFIPS", axis="index")
+    pop_affected = pop_affected.reset_index(level=1).pivot(columns=["CountyFIPS"])
+    pop_affected.plot(
+        stacked=True,
+        legend=False,
+        ax=ax,
+        cmap=cmap,
+        alpha=0.5,
+        drawstyle="steps-post",
+        linewidth=1
+    )
 
-        event_duration = pd.Timedelta(resample_freq) * outage_attr.n_periods
-        if event_duration > pd.Timedelta(max_plot_length):
-            print(f"{event_duration=} > {max_plot_length=} for {cluster_id=}, skipping")
-            continue
-
-        # add a buffer around the start and end of the run
-        event_start_datetime = pd.to_datetime(outage_attr.event_start)
-        plot_start: str = str((event_start_datetime - pd.Timedelta(start_buffer)).date())
-        event_end_datetime = event_start_datetime + event_duration
-        plot_end: str = str((event_end_datetime + pd.Timedelta(end_buffer)).date())
-
-        county_hourly: pd.DataFrame = hourly.loc[(slice(plot_start, plot_end), outage_attr.CountyFIPS), :]
-        county_name, state_name, state_alpha_code = us_county_name(outage_attr.CountyFIPS, counties, states)
-
-        # select our hourly data to plot
-        label_str = f"{county_name}, {state_alpha_code}"
-        timeseries = 1 - county_hourly.droplevel(1).loc[:, "OutageFraction"]
-        timeseries.plot(
-            ax=ax,
-            x_compat=True,  # enforce standard matplotlib date tick labelling "2023-09-21"
-            label=label_str,
-            color=cmap(hash(label_str) % 100 / 100)
-        )
-
-    ax.set_ylabel("1 - Fraction of customers in county without power", labelpad=20)
+    ax.set_ylabel("Population disconnected", labelpad=20)
     ax.set_xlabel("Time", labelpad=20)
     ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
-    ax.set_ylim(-0.05, 1.1)
-    ax.grid(alpha=0.3, which="both")
-    ax.set_title(f"POUS outage cluster {cluster_id}")
-    handles, labels = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    if len(handles) < 30:
-        ax.legend(
-            by_label.values(),
-            by_label.keys(),
-            bbox_to_anchor=(1.08, 0.98),
-            ncols=max(1, int(np.ceil(len(cluster) / 35))),
-            loc="upper right",
-            prop={'size':7}
-        )
+    ax.grid(alpha=0.3, which="major")
+    peak_pop_affected: int = int(np.round(pop_affected.sum(axis=1).max()))
+    pop_hours_lost: int = int(np.round(cluster.pop_hours_supply_lost.sum()))
+    ax.set_title(
+        f"Outage cluster {cluster_name}\n"
+        f"Peak population affected: {peak_pop_affected:,d}\n"
+        f"Person-hours supply lost: {pop_hours_lost:,d}"
+    )
 
     plt.subplots_adjust(bottom=0.2, top=0.9, left=0.1, right=0.9)
 
     # inset map of county centres
-    ax_map = f.add_axes([0.73, 0.1, 0.3, 0.2])
+    ax_map = f.add_axes([0.62, 0.66, 0.4, 0.3])
     affected_counties = counties[counties.GEOID.isin(cluster.CountyFIPS)]
-    affected_counties.loc[:, ["GEOID", "geometry"]].merge(
-        cluster.loc[:, ["CountyFIPS", "days_since_data_start"]],
-        left_on="GEOID",
-        right_on="CountyFIPS"
-    ).plot(
-        column="days_since_data_start",
-        cmap="Blues",
+    affected_counties.plot(
+        color="white",
         ax=ax_map
     )
     country.boundary.plot(ax=ax_map, alpha=0.5)
@@ -263,8 +243,7 @@ def plot_event_cluster(
     ax_map.set_xlabel("Longitude [deg]")
 
     # save to disk
-    time, space = cluster_id
-    filename = f"{time}_{space}_{plot_start}_{plot_end}.png"
+    filename = f"{cluster_name}_{str(plot_start).replace(' ', '_')}_{str(plot_end).replace(' ', '_')}.png"
     filepath = os.path.join(plot_dir, filename)
     print(filepath)
     f.savefig(filepath)
@@ -278,6 +257,7 @@ def plot_event(
     county_code: str,
     event_duration: pd.Timedelta,
     event_magnitude: float,
+    population_hours_lost: float,
     county_hourly: pd.DataFrame,
     county_resampled: pd.DataFrame,
     counties: gpd.GeoDataFrame,
@@ -331,10 +311,12 @@ def plot_event(
     ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
     ax.set_ylim(-0.05, 1.1)
     ax.grid(alpha=0.3, which="both")
-    duration_hours: float = event_duration.total_seconds() / (60 * 60)
+    duration_hours: int = int(np.round(event_duration.total_seconds() / (60 * 60)))
     ax.set_title(
-        f"{event_start} power outage event, {admin_str} ({county_code})\n"
-        f"{duration_hours:.2f} hours duration, {event_magnitude:.2f} magnitude, {event_magnitude / duration_hours:.2f} magnitude / duration"
+        "Electricity outage event\n"
+        f"{event_start}, {admin_str} ({county_code})\n\n"
+        f"{duration_hours:,d} hours duration, {int(np.round(population_hours_lost)):,d} person-hours supply lost\n"
+        f"{event_magnitude:.2f} magnitude, {event_magnitude / duration_hours:.2f} magnitude / duration"
     )
     ax.legend(loc="lower right")
     filename = f"{event_start.date()}_{county_code}.png"
