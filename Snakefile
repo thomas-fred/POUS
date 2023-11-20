@@ -231,6 +231,8 @@ rule identify_events:
 
                 duration: pd.Timedelta = event_end - event_start
                 duration_hours: float = duration.total_seconds() / (60 * 60)
+
+                # in units of hours
                 outage_magnitude: float = county_resampled_outage.loc[event_start: event_end, "OutageFraction"].sum()
 
                 n_periods = duration / resample_period
@@ -254,6 +256,7 @@ rule identify_events:
                         duration_hours,
                         int(n_periods),
                         outage_magnitude,
+                        outage_magnitude * county_pop,
                     )
                 )
 
@@ -270,6 +273,7 @@ rule identify_events:
                 "duration_hours",
                 "n_periods",
                 "integral",
+                "pop_hours_supply_lost",
             ]
         )
         events = events.sort_values("days_since_data_start").reset_index(drop=True)
