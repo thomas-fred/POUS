@@ -8,6 +8,7 @@ dependencies:
   - ipykernel
   - jupyter
   - nb_conda_kernels
+  - netcdf4
   - matplotlib
   - multiprocess
   - pandas
@@ -16,3 +17,4 @@ dependencies:
   - pyarrow
   - python==3.11
   - snakemake
+  - xarray
