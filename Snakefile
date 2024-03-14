@@ -442,38 +442,24 @@ rule cluster_events_by_storm:
         storm_clusters.to_parquet(output.storm_cluster_summary)
 
 
-rule plot_event_duration_against_wind_speed:
+rule collate_event_duration_wind_speed:
     """
-    Join event set with storm track data, plot outages associated with each storm.
-
-    Save aggregate outage statistics for storms.
+    Join event set with storm max wind field data.
     """
     input:
         max_wind_field = "data/input/max_wind_fields/IBTrACS_2017-2022.nc",
-        counties = "data/input/counties/geometry/cb_2018_us_county_500k.shp",
-        states = "data/input/states/state_codes.csv",
         storm_cluster_summary = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_clusters.gpq",
         storm_clusters = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_clusters"),
     output:
-        duration_wind_speed_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/duration_wind_speed_scatter.png",
-        duration_wind_speed_scatter_linear = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/duration_wind_speed_scatter_linear.png",
-        duration_wind_speed_density = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/duration_wind_speed_density.png",
+        duration_wind_speed = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/duration_wind_speed.pq",
     run:
         import geopandas as gpd
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from matplotlib.lines import Line2D
         import numpy as np
         import pandas as pd
         import xarray as xr
 
-        plt.style.use('dark_background')  # for cool points
-
         print("Reading input data...")
         max_wind_fields = xr.open_dataset(input.max_wind_field).max_wind_speed
-        counties = gpd.read_file(input.counties)
-        states = pd.read_csv(input.states)
         storm_clusters = pd.read_parquet(input.storm_cluster_summary).set_index("track_id")
 
         all_events = []
@@ -486,7 +472,6 @@ rule plot_event_duration_against_wind_speed:
                 continue
 
             track_dir = os.path.join(input.storm_clusters, track_id)
-            track = gpd.read_parquet(os.path.join(track_dir, "track.gpq"))
             pop_affected = pd.read_parquet(os.path.join(track_dir, "pop_affected.pq"))
             events = gpd.read_parquet(os.path.join(track_dir, "events.gpq"))
 
@@ -502,19 +487,66 @@ rule plot_event_duration_against_wind_speed:
             all_events.append(events)
 
         all_events = pd.concat(all_events).reset_index(drop=True)
+        all_events.to_parquet(output.duration_wind_speed)
+
+
+rule plot_event_duration_against_wind_speed:
+    """
+    Plot outage duration on maximum associated with each storm.
+    """
+    input:
+        events = rules.collate_event_duration_wind_speed.output.duration_wind_speed,
+        storm_cluster_summary = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_clusters.gpq",
+    output:
+        duration_wind_speed_scatter = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/duration_wind_speed_scatter.png",
+        duration_wind_speed_scatter_linear = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/duration_wind_speed_scatter_linear.png",
+        duration_wind_speed_density = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/duration_wind_speed_density.png",
+    run:
+        from typing import Callable
+
+        import geopandas as gpd
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+        import numpy as np
+        import pandas as pd
+        import scipy
+
+        plt.style.use('dark_background')  # for cool points
+
+        print("Reading input data...")
+        events = pd.read_parquet(input.events)
+        storm_clusters = pd.read_parquet(input.storm_cluster_summary).set_index("track_id")
+
+        def fit_function(f: Callable, x: np.ndarray, y: np.ndarray):
+            """
+            Fit a function `f` with independent data `x` to dependent data `y`.
+            Scipy doesn't give the r-squared, so calculate that too.
+
+            Returns least-squares optimum function parameters for `f` and R-squared.
+            """
+            opt_params, covariance = scipy.optimize.curve_fit(f, x, y)
+            residuals = y - f(x, *opt_params)
+            r_squared = 1 - (np.sum(residuals ** 2) / np.sum((y - np.mean(y)) ** 2))
+            return opt_params, r_squared
+
+        def linear(x: np.ndarray, m: float, c: float) -> np.ndarray:
+            return m * x + c
 
         # scatter plot
+        track_ids = events.track_id.unique()
+        colour_mapping = dict(zip(track_ids, matplotlib.colormaps["spring"](np.linspace(0, 1, len(events.track_id.unique())))))
+        f, ax = plt.subplots(figsize=(16, 8))
+        track_categories, _ = pd.factorize(events.track_id)
+        ax.grid(alpha=0.2, which="both")
+
         def pop_markersize(x: np.array) -> np.array:
             """County population -> marker size"""
             return np.log10(x) ** 4.5 / 10
 
-        track_ids = all_events.track_id.unique()
-        colour_mapping = dict(zip(track_ids, matplotlib.colormaps["spring"](np.linspace(0, 1, len(all_events.track_id.unique())))))
-        f, ax = plt.subplots(figsize=(16, 8))
-        track_categories, _ = pd.factorize(all_events.track_id)
-        ax.grid(alpha=0.2, which="both")
         for i, track_id in enumerate(track_ids):
-            to_plot = all_events[all_events.track_id == track_id]
+            to_plot = events[events.track_id == track_id]
             storm_name: str = storm_clusters.loc[track_id, "storm_name"]
             storm_year: int = storm_clusters.loc[track_id, "start_date"].year
             ax.scatter(
@@ -535,6 +567,17 @@ rule plot_event_duration_against_wind_speed:
         )
         for handle in storm_legend.legend_handles:
             handle.set_sizes([8])
+
+        # fit linear trend
+        wind_speed_damage_threshold_ms = 20.0
+        events_to_fit = events[events.max_wind_speed_ms > wind_speed_damage_threshold_ms].copy(deep=True)
+        wind_speed = events_to_fit.max_wind_speed_ms.values
+        duration = events_to_fit.duration_hours.values
+        opt_params, r_squared = fit_function(linear, wind_speed, duration)
+        print(f"{wind_speed_damage_threshold_ms=:.2f}, {opt_params=}, {r_squared=:.2f}")
+        x = np.linspace(wind_speed_damage_threshold_ms, events.max_wind_speed_ms.max(), 100)
+        y = linear(x, *opt_params)
+        ax.plot(x, y, ls="-", c="white", alpha=0.8)
 
         pop_min_10 = 4
         pop_max_10 = 7
@@ -564,16 +607,16 @@ rule plot_event_duration_against_wind_speed:
         ax.add_artist(pop_legend)
         ax.add_artist(storm_legend)
 
-        ax.set_xlabel("Modelled maximum wind speed [ms-1]", labelpad=20)
+        ax.set_xlabel("Modelled maximum wind speed, $v$ [ms$^{-1}$]", labelpad=20)
         x_min, x_max = ax.get_xlim()
         ax.set_xlim(x_min, x_max * 1.15)
 
         ax.set_yscale("log")
-        ax.set_ylabel("Outage duration [hours]", labelpad=20)
+        ax.set_ylabel("Outage duration, $d$ [hours]", labelpad=20)
         y_min, y_max = ax.get_ylim()
         ax.set_ylim(y_min, y_max * 7)
 
-        max_hours = all_events.duration_hours.max()
+        max_hours = events.duration_hours.max()
         duration_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
         log_artists = []
         for duration, label in duration_label:
@@ -581,7 +624,7 @@ rule plot_event_duration_against_wind_speed:
                 ax.axhline(duration, ls="--", alpha=0.5)
                 log_artists.append(
                     ax.text(
-                        0.04 * all_events.max_wind_speed_ms.max(),
+                        0.04 * events.max_wind_speed_ms.max(),
                         duration * 1.15,
                         label,
                         horizontalalignment="left",
@@ -589,21 +632,26 @@ rule plot_event_duration_against_wind_speed:
                     )
                 )
 
-        years = set(all_events.event_start.apply(lambda dt: dt.year))
-        ax.set_title(f"County level outage events {min(years)}-{max(years)}", pad=10)
+        years = set(events.event_start.apply(lambda dt: dt.year))
+        m, c = opt_params
+        ax.set_title(
+            f"County level outage events {min(years)}-{max(years)}\n\n"
+            f"Fit for $v > {{{wind_speed_damage_threshold_ms}}}$ [ms$^{{-1}}$]: $d = {{{m:.1f}}}v {{{c:.1f}}}$, $R^{2}={{{r_squared:.2f}}}$",
+            pad=10,
+        )
 
         f.savefig(output.duration_wind_speed_scatter)
 
         # linear yscale version of same scatter plot
         ax.set_yscale("linear")
-        ax.set_ylim(0, all_events.duration_hours.max() * 1.2)
+        ax.set_ylim(0, events.duration_hours.max() * 1.2)
 
         # remove previous annotations, redraw with appropriate offset for linear scale
         [artist.remove() for artist in log_artists]
         for duration, label in duration_label:
             if max_hours > duration:
                 ax.text(
-                    0.04 * all_events.max_wind_speed_ms.max(),
+                    0.04 * events.max_wind_speed_ms.max(),
                     duration + 10,
                     label,
                     horizontalalignment="left",
@@ -616,13 +664,13 @@ rule plot_event_duration_against_wind_speed:
         f, ax = plt.subplots(figsize=(16, 8))
 
         xscale = "linear"
-        n_bins_x = int(np.round(3 * np.cbrt(len(all_events))))
+        n_bins_x = int(np.round(3 * np.cbrt(len(events))))
 
         # run hexbinning once to find the counts per bin
         g, g_ax = plt.subplots(figsize=(16, 8))
         hexbin_counts = g_ax.hexbin(
-            all_events.max_wind_speed_ms,
-            all_events.duration_hours,
+            events.max_wind_speed_ms,
+            events.duration_hours,
             gridsize=n_bins_x,
             xscale=xscale,
             yscale="log"
@@ -630,8 +678,8 @@ rule plot_event_duration_against_wind_speed:
         plt.close(g)
 
         hexbin = ax.hexbin(
-            all_events.max_wind_speed_ms,
-            all_events.duration_hours,
+            events.max_wind_speed_ms,
+            events.duration_hours,
             gridsize=n_bins_x,
             cmap=matplotlib.colormaps["magma"],
             xscale=xscale,
@@ -644,13 +692,13 @@ rule plot_event_duration_against_wind_speed:
         )
         cbar = f.colorbar(hexbin, ax=ax, label='Frequency', extend="max")
 
-        max_hours = all_events.duration_hours.max()
+        max_hours = events.duration_hours.max()
         duration_label = [(24, "Day"), (24 * 7, "Week"), (24 * 31, "Month")]
         for duration, label in duration_label:
             if max_hours > duration:
                 ax.axhline(duration, ls="--", alpha=0.5)
                 ax.text(
-                    0.97 * all_events.max_wind_speed_ms.max(),
+                    0.97 * events.max_wind_speed_ms.max(),
                     duration * 1.05,
                     label,
                     horizontalalignment="right",
