@@ -2,6 +2,7 @@ archive/
 build/
 data/
 plots/
+src/pous.egg-info/
 .snakemake/
 .ipynb_checkpoints/
 __pycache__
