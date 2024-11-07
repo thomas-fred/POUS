@@ -16,4 +16,5 @@ dependencies:
   - pyarrow
   - python==3.11
   - bioconda::snakemake
+  - tqdm
   - xarray
