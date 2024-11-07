@@ -178,10 +178,8 @@ def plot_event_cluster(
     plot_dir: str,
 ):
 
-    plt.style.use('dark_background')  # for cool points
-    cmap = matplotlib.colormaps['spring']
-
     f, ax = plt.subplots(figsize=(16, 8))
+    cmap = matplotlib.colormaps['PuRd']
 
     plot_start = pop_affected.index.min()
     plot_end = pop_affected.index.max()
@@ -209,7 +207,7 @@ def plot_event_cluster(
         f"Person-hours supply lost: {pop_hours_lost:,d}"
     )
 
-    plt.subplots_adjust(bottom=0.2, top=0.9, left=0.1, right=0.9)
+    plt.subplots_adjust(bottom=0.2, top=0.8, left=0.1, right=0.9)
 
     # inset map of county centres
     ax_map = f.add_axes([0.62, 0.66, 0.4, 0.3])
@@ -223,7 +221,7 @@ def plot_event_cluster(
         cmap="Blues",
         ax=ax_map
     )
-    country.boundary.plot(ax=ax_map, alpha=0.5)
+    country.boundary.plot(ax=ax_map, alpha=0.5, color="k")
     ax_map.grid(alpha=0.2)
     ax_map.set_xlim(-130, -65)
     ax_map.set_ylim(22, 53)
@@ -257,9 +255,6 @@ def plot_event(
     """
     Plot timeseries of single event, along with inferred event start and end.
     """
-
-    plt.style.use('dark_background')  # for cool points
-    cmap = matplotlib.colormaps['spring']
 
     f, ax = plt.subplots(figsize=(16, 10))
     ax.axhline(1 - outage_threshold, ls="--", color="white", label="Outage threshold")
@@ -381,8 +376,6 @@ def plot_events_summary(
     Plots that summarise identified events.
     """
 
-    plt.style.use('dark_background')  # for cool points
-
     events["geometry"] = gpd.points_from_xy(events.longitude, events.latitude)
     events = gpd.GeoDataFrame(events)
 
@@ -394,7 +387,6 @@ def plot_events_summary(
     outage_events_per_county.plot(
         column="n_periods",
         ax=ax,
-        cmap=matplotlib.colormaps["spring"],
         norm=matplotlib.colors.LogNorm(vmin=1, vmax=outage_events_per_county.n_periods.max()),
         legend=True,
         legend_kwds={

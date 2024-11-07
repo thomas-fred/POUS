@@ -17,9 +17,6 @@ from sklearn.cluster import DBSCAN
 from sklearn.metrics.pairwise import haversine_distances
 
 
-plt.style.use('dark_background')  # for cool points
-
-
 if __name__ == "main":
     # input parameters
 
@@ -418,7 +415,7 @@ ax.set_title(f"POUS outage duration seasonality, {min(years)}-{max(years)}")
 # plot timeseries for each event, with a little inset map of relevant counties
 
 os.makedirs(plot_dir, exist_ok=True)
-cmap = matplotlib.colormaps['spring']
+cmap = matplotlib.colormaps['cubehelix_r']
 max_plot_length = "90D"
 
 #for i, cluster_id in [(1, (35, 0))]:

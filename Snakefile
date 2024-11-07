@@ -11,6 +11,8 @@ wildcard_constraints:
     SPACE_DEG=number_regex,
 
 YEARS = range(2017, 2023)  # years of available data
+import matplotlib.pyplot as plt
+plt.style.use('bmh')
 
 
 rule extract_raw_outage_csv:
@@ -449,7 +451,7 @@ rule collate_event_duration_wind_speed:
     input:
         max_wind_field = "data/input/max_wind_fields/IBTrACS_2017-2022.nc",
         storm_cluster_summary = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_clusters.gpq",
-        storm_clusters = directory("data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_clusters"),
+        storm_clusters = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_clusters",
     output:
         duration_wind_speed = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/duration_wind_speed.pq",
     run:
@@ -513,8 +515,6 @@ rule plot_event_duration_against_wind_speed:
         import pandas as pd
         import scipy
 
-        plt.style.use('dark_background')  # for cool points
-
         print("Reading input data...")
         events = pd.read_parquet(input.events)
         storm_clusters = pd.read_parquet(input.storm_cluster_summary).set_index("track_id")
@@ -536,7 +536,7 @@ rule plot_event_duration_against_wind_speed:
 
         # scatter plot
         track_ids = events.track_id.unique()
-        colour_mapping = dict(zip(track_ids, matplotlib.colormaps["spring"](np.linspace(0, 1, len(events.track_id.unique())))))
+        colour_mapping = dict(zip(track_ids, matplotlib.colormaps["cubehelix_r"](np.linspace(0, 1, len(events.track_id.unique())))))
         f, ax = plt.subplots(figsize=(16, 8))
         track_categories, _ = pd.factorize(events.track_id)
         ax.grid(alpha=0.2, which="both")
@@ -721,7 +721,7 @@ rule plot_storm_events_bar_chart:
     Plot bar chart of person-hours of lost supply due to storms.
     """
     input:
-        storm_clusters = rules.cluster_events_by_storm.output.storm_clusters,
+        storm_clusters = rules.cluster_events_by_storm.output.storm_cluster_summary,
     output:
         bar_chart = "data/output/outage/{RESAMPLE_FREQ}/{THRESHOLD}/storm_clusters_hours_lost.png",
     run:
@@ -730,8 +730,6 @@ rule plot_storm_events_bar_chart:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-
-        plt.style.use('dark_background')  # for cool points
 
         events = gpd.read_parquet(input.storm_clusters)
         events["name_year"] = events.apply(lambda row: f"{row.storm_name}, {row.start_date.year}", axis=1)
